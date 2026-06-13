@@ -10,6 +10,10 @@ services:
     volumes:
       - vibe-runs:/app/agent/runs
       - vibe-sessions:/app/agent/sessions
+      # Persist user accounts, credits, reports, notify config (~/.vibe-trading
+      # inside the container is /home/vibe/.vibe-trading). Without this, users /
+      # balances / saved reports are lost on container rebuild.
+      - vibe-data:/home/vibe/.vibe-trading
     restart: unless-stopped
 
   frontend:
@@ -31,3 +35,4 @@ services:
 volumes:
   vibe-runs:
   vibe-sessions:
+  vibe-data:

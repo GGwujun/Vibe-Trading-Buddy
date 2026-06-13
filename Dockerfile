@@ -45,7 +45,8 @@ RUN pip install --no-cache-dir -e .
 # the service user so named Docker volumes inherit usable permissions.
 RUN useradd --create-home --shell /usr/sbin/nologin vibe \
     && mkdir -p agent/runs agent/sessions agent/uploads agent/.swarm/runs \
-    && chown -R vibe:vibe /app
+    && mkdir -p /home/vibe/.vibe-trading \
+    && chown -R vibe:vibe /app /home/vibe
 USER vibe
 
 # Default port

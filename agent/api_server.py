@@ -1360,17 +1360,22 @@ async def list_runs(limit: int = 20):
     return results
 
 
+# Admin-only guard for the system-config endpoints (settings). Imported here
+# (before the settings routes are defined) from auth_routes.
+from src.api.auth_routes import require_admin  # noqa: E402
+
+
 @app.get(
     "/settings/llm",
     response_model=LLMSettingsResponse,
-    dependencies=[Depends(require_local_or_auth)],
+    dependencies=[Depends(require_admin)],
 )
 async def get_llm_settings():
     """Return project-local LLM settings for the Web UI."""
     return _build_llm_settings_response()
 
 
-@app.put("/settings/llm", response_model=LLMSettingsResponse, dependencies=[Depends(require_local_or_auth)])
+@app.put("/settings/llm", response_model=LLMSettingsResponse, dependencies=[Depends(require_admin)])
 async def update_llm_settings(payload: UpdateLLMSettingsRequest):
     """Persist project-local LLM settings and update the running process."""
     provider_name = payload.provider.strip().lower()
@@ -1431,7 +1436,7 @@ async def update_llm_settings(payload: UpdateLLMSettingsRequest):
 @app.get(
     "/settings/data-sources",
     response_model=DataSourceSettingsResponse,
-    dependencies=[Depends(require_local_or_auth)],
+    dependencies=[Depends(require_admin)],
 )
 async def get_data_source_settings():
     """Return project-local data source credentials for the Web UI."""
@@ -1441,7 +1446,7 @@ async def get_data_source_settings():
 @app.put(
     "/settings/data-sources",
     response_model=DataSourceSettingsResponse,
-    dependencies=[Depends(require_local_or_auth)],
+    dependencies=[Depends(require_admin)],
 )
 async def update_data_source_settings(payload: UpdateDataSourceSettingsRequest):
     """Persist project-local data source credentials and update the running process."""

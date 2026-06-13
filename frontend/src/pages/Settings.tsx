@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "re
 import { Bell, Database, KeyRound, Loader2, RotateCcw, Save, Send, Server, ShieldCheck, SlidersHorizontal } from "lucide-react";
 import { toast } from "sonner";
 import { api, isAuthRequiredError, type DataSourceSettings, type LLMProviderOption, type LLMSettings, type NotifyConfig, type PlatformConfig } from "@/lib/api";
-import { getApiAuthKey, setApiAuthKey } from "@/lib/apiAuth";
+import { getApiAuthKey, isAdmin, setApiAuthKey } from "@/lib/apiAuth";
 import { cn } from "@/lib/utils";
 
 interface LLMFormState {
@@ -49,7 +49,7 @@ export function Settings() {
   const [saving, setSaving] = useState(false);
   const [dataSaving, setDataSaving] = useState(false);
   const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"system" | "notify">("system");
+  const [tab, setTab] = useState<"system" | "notify">(isAdmin() ? "system" : "notify");
 
   useEffect(() => {
     let alive = true;
@@ -221,12 +221,12 @@ export function Settings() {
     <div className="mx-auto max-w-6xl space-y-6 p-6">
       <PageHeader />
 
-      {/* Tab switch */}
+      {/* Tab switch — 系统配置 Tab 仅管理员可见 */}
       <div className="flex gap-1 border-b">
         {([
-          { id: "system" as const, label: "系统配置" },
-          { id: "notify" as const, label: "通知配置" },
-        ]).map(t => (
+          { id: "system" as const, label: "系统配置", adminOnly: true },
+          { id: "notify" as const, label: "通知配置", adminOnly: false },
+        ]).filter(t => !t.adminOnly || isAdmin()).map(t => (
           <button
             key={t.id}
             onClick={() => setTab(t.id)}
@@ -242,7 +242,7 @@ export function Settings() {
         ))}
       </div>
 
-      {tab === "notify" ? (
+      {tab === "notify" || !isAdmin() ? (
         <NotifyTab />
       ) : (
         <>

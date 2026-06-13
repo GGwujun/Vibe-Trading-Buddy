@@ -68,11 +68,19 @@ class UserStore:
                     email TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
                     disclaimer_accepted_at TEXT,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            # Migration: add is_admin column if upgrading from an older schema.
+            try:
+                conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass  # column already exists
             conn.commit()
+        # Ensure the seeded admin account exists.
+        self._ensure_admin()
 
     def _init_conn_locked(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -91,7 +99,35 @@ class UserStore:
             "email": row["email"],
             "disclaimer_accepted_at": row["disclaimer_accepted_at"],
             "created_at": row["created_at"],
+            "is_admin": bool(row["is_admin"]) if "is_admin" in row.keys() else False,
         }
+
+    def _ensure_admin(self) -> None:
+        """Seed the admin account from env vars on startup. Idempotent.
+
+        ADMIN_EMAIL / ADMIN_PASSWORD override the defaults; the admin always
+        has is_admin=1 and disclaimer pre-accepted (so the modal doesn't gate
+        the operator).
+        """
+        import os
+        email = os.getenv("ADMIN_EMAIL", "admin@sigmx.local").strip().lower()
+        password = os.getenv("ADMIN_PASSWORD", "admin123")
+        with self._lock:
+            conn = self._init_conn_locked()
+            row = conn.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone()
+            if row:
+                # Promote to admin if it somehow isn't.
+                conn.execute("UPDATE users SET is_admin = 1 WHERE email = ?", (email,))
+                conn.commit()
+                return
+            user_id = uuid.uuid4().hex
+            conn.execute(
+                "INSERT INTO users (id, email, password_hash, disclaimer_accepted_at, created_at, is_admin) "
+                "VALUES (?, ?, ?, ?, ?, 1)",
+                (user_id, email, hash_password(password), _now_iso(), _now_iso()),
+            )
+            conn.commit()
+        logger.info("Seeded admin account: %s", email)
 
     def create_user(self, email: str, password: str) -> dict[str, Any]:
         """Insert a new user. Raises ValueError if email already exists."""

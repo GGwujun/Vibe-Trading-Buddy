@@ -11,6 +11,7 @@ class User(BaseModel):
     email: str
     disclaimer_accepted_at: str | None = None
     created_at: str
+    is_admin: bool = False
 
 
 class RegisterRequest(BaseModel):

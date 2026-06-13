@@ -21,6 +21,7 @@ export interface AuthUser {
   email: string;
   disclaimer_accepted_at: string | null;
   created_at: string;
+  is_admin?: boolean;
 }
 
 /* ---------- JWT token ---------- */
@@ -52,6 +53,10 @@ export function setUser(user: AuthUser | null): void {
 
 export function disclaimerAccepted(): boolean {
   return !!getUser()?.disclaimer_accepted_at;
+}
+
+export function isAdmin(): boolean {
+  return !!getUser()?.is_admin;
 }
 
 export function isAuthenticated(): boolean {

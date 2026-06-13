@@ -4,6 +4,7 @@ import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, Chevron
 import { cn } from "@/lib/utils";
 import { useDarkMode } from "@/hooks/useDarkMode";
 import { api, type SessionItem } from "@/lib/api";
+import { isAdmin } from "@/lib/apiAuth";
 import { useAgentStore } from "@/stores/agent";
 import { ConnectionBanner } from "@/components/layout/ConnectionBanner";
 import { SigmXLogo } from "@/components/brand/SigmXLogo";
@@ -124,7 +125,8 @@ export function Layout() {
 
         {/* Nav */}
         <nav className={cn("shrink-0 overflow-auto", collapsed ? "p-1 space-y-1" : "max-h-[46vh] p-2 space-y-3")}>
-          {NAV_GROUPS.map((group) => (
+          {/* "策略实验室" group (Factor Zoo) is admin-only. */}
+          {NAV_GROUPS.filter(g => isAdmin() || g.title !== "策略实验室").map((group) => (
             <div key={group.title} className="space-y-0.5">
               {!collapsed && (
                 <div className="px-3 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70 dark:text-slate-500">

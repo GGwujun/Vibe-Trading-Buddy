@@ -53,6 +53,20 @@ async def require_user(
     return user
 
 
+async def require_admin(
+    request: Request,
+    cred: HTTPAuthorizationCredentials | None = Depends(_security),
+) -> dict[str, Any]:
+    """Validate JWT AND require the user to be an admin. Returns the user dict.
+
+    Used by operator-only endpoints (system settings, etc.).
+    """
+    user = await require_user(request, cred)
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
+    return user
+
+
 def register_auth_routes(app: FastAPI) -> APIRouter:
     router = APIRouter(prefix="/auth", tags=["auth"])
 

@@ -2,6 +2,7 @@ import { Suspense, lazy, type ComponentType } from "react";
 import { Navigate, Outlet, createBrowserRouter } from "react-router-dom";
 import { Layout } from "@/components/layout/Layout";
 import { DisclaimerModal } from "@/components/DisclaimerModal";
+import { isAdmin } from "@/lib/apiAuth";
 import { useAuthState } from "@/hooks/useAuthState";
 
 const Home = lazy(() => import("@/pages/Home").then((m) => ({ default: m.Home })));
@@ -97,6 +98,14 @@ function RequireAuth() {
   );
 }
 
+/** Admin guard. Non-admins are bounced to home. */
+function RequireAdmin() {
+  if (!isAdmin()) {
+    return <Navigate to="/" replace />;
+  }
+  return <Outlet />;
+}
+
 export const router = createBrowserRouter([
   // Public routes — no auth guard
   { path: "/login", element: wrap(LoginPage) },
@@ -114,10 +123,6 @@ export const router = createBrowserRouter([
           { path: "/runs/:runId", element: wrap(RunDetail) },
           { path: "/compare", element: wrap(Compare) },
           { path: "/correlation", element: wrap(Correlation) },
-          { path: "/alpha-zoo", element: wrap(AlphaZoo) },
-          { path: "/alpha-zoo/bench", element: wrap(AlphaZoo) },
-          { path: "/alpha-zoo/compare", element: wrap(AlphaZoo) },
-          { path: "/alpha-zoo/:alphaId", element: wrap(AlphaZoo) },
           { path: "/events", element: wrap(Events) },
           { path: "/position-decision", element: wrap(PositionDecision) },
           { path: "/news", element: wrap(News) },
@@ -127,6 +132,21 @@ export const router = createBrowserRouter([
           { path: "/fund-arbitrage", element: wrap(FundArbitrage) },
           { path: "/fund-opportunity", element: wrap(FundOpportunity) },
           { path: "/account", element: wrap(Account) },
+        ],
+      },
+      // Admin-only routes (Factor Zoo) — wrapped in RequireAdmin.
+      {
+        element: <RequireAdmin />,
+        children: [
+          {
+            element: <Layout />,
+            children: [
+              { path: "/alpha-zoo", element: wrap(AlphaZoo) },
+              { path: "/alpha-zoo/bench", element: wrap(AlphaZoo) },
+              { path: "/alpha-zoo/compare", element: wrap(AlphaZoo) },
+              { path: "/alpha-zoo/:alphaId", element: wrap(AlphaZoo) },
+            ],
+          },
         ],
       },
     ],
