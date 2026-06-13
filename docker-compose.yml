@@ -1,5 +1,8 @@
 services:
   vibe-trading:
+    # Pull the prebuilt image from ghcr.io (production). Falls back to local
+    # build with `docker compose build` / `docker compose up --build`.
+    image: ghcr.io/ggwujun/vibe-trading-buddy:latest
     build: .
     ports:
       - "127.0.0.1:8899:8899"
