@@ -83,12 +83,17 @@ def _fetch_feed(route: str, timeout: int = 10) -> list[dict[str, Any]]:
     return out
 
 
-# Curated routes for A-share context. Keys are display names.
+# Curated routes for A-share + international context. Keys are display names.
+# Routes follow RSSHub official docs; some may be unavailable depending on the
+# RSSHub version / source anti-scraping — failed feeds return [] silently.
 _FEEDS = {
     "财联社电报": "/cls/telegraph",
     "东方财富-财经": "/eastmoney/news/cjpl",
     "雪球热帖": "/xueqiu/hots",
     "同花顺-财经": "/10jqka/cjzx",
+    "华尔街见闻": "/wallstreetcn/news/global",
+    "新浪财经": "/sina/finance",
+    "金十数据-快讯": "/jin10/",
 }
 
 
