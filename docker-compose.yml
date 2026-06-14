@@ -2,7 +2,9 @@ services:
   vibe-trading:
     # Pull the prebuilt image from ghcr.io (production). Falls back to local
     # build with `docker compose build` / `docker compose up --build`.
-    image: ghcr.io/ggwujun/sigmx:latest
+    # Default to Aliyun ACR (China, faster pull from CN servers). ghcr.io is
+    # also pushed by CI for non-CN use. Override with `image:` if needed.
+    image: crpi-i6pwsm2rbcu2h5uv.cn-shenzhen.personal.cr.aliyuncs.com/ggwujun/sigmx:latest
     build: .
     ports:
       - "127.0.0.1:8899:8899"

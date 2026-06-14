@@ -1,15 +1,19 @@
-# Build and push the Docker image to GitHub Container Registry (ghcr.io).
+# Build and push the Docker image to TWO registries:
+#   - ghcr.io/ggwujun/sigmx  (multi-arch: amd64 + arm64)
+#   - Aliyun ACR (China, amd64 only — personal-tier ACR doesn't support
+#     multi-arch manifests, and CN servers are amd64 anyway)
 #
 # Triggers:
-#   - push to main → build :latest (and :sha) for linux/amd64 + linux/arm64
-#   - version tag (v*) → also tag :<version>
+#   - push to main → :latest (and :sha)
+#   - version tag (v*) → :<version>
 #   - manual dispatch
 #
-# The image is published to ghcr.io/ggwujun/sigmx. On the server
-# you then just `docker compose pull && docker compose up -d` — no git clone,
-# no local build.
+# Required secrets (Settings → Secrets and variables → Actions):
+#   - ALIYUN_REGISTRY          e.g. crpi-xxx.cn-shenzhen.personal.cr.aliyuncs.com
+#   - ALIYUN_REGISTRY_USERNAME account id (or the username you set)
+#   - ALIYUN_REGISTRY_PASSWORD the fixed access password from ACR console
 #
-# GITHUB_TOKEN with packages:write is automatic; no extra secrets needed.
+# GITHUB_TOKEN for ghcr is automatic.
 
 name: Build & Publish Docker Image
 
@@ -20,8 +24,11 @@ on:
   workflow_dispatch:
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  GHCR_REGISTRY: ghcr.io
+  GHCR_IMAGE: ${{ github.repository }}
+  # Aliyun ACR (Shenzhen, personal tier). Full path: $ALIYUN_REGISTRY/ggwujun/sigmx
+  ALIYUN_REGISTRY: crpi-i6pwsm2rbcu2h5uv.cn-shenzhen.personal.cr.aliyuncs.com
+  ALIYUN_IMAGE: ggwujun/sigmx
 
 jobs:
   build-and-push:
@@ -40,30 +47,54 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # ---------- ghcr.io (multi-arch) ----------
       - name: Log in to ghcr.io
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ${{ env.GHCR_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
-        id: meta
+      - name: ghcr metadata
+        id: meta_ghcr
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=short
             type=ref,event=tag
 
-      - name: Build and push
+      - name: Build & push to ghcr (amd64 + arm64)
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta_ghcr.outputs.tags }}
+          labels: ${{ steps.meta_ghcr.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # ---------- Aliyun ACR (China, amd64 only) ----------
+      # Personal-tier ACR has no multi-arch manifest support, and the CN
+      # deployment server is amd64, so we push a single-arch image here.
+      - name: Log in to Aliyun ACR
+        if: ${{ secrets.ALIYUN_REGISTRY_PASSWORD != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+
+      - name: Build & push to Aliyun ACR (amd64)
+        if: ${{ secrets.ALIYUN_REGISTRY_PASSWORD != '' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_IMAGE }}:latest
+            ${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
