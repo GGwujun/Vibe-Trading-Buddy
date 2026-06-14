@@ -35,6 +35,38 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Overseas proxy support — route blocked foreign APIs through the proxy
+# ---------------------------------------------------------------------------
+
+def _proxy_get_json(url: str, timeout: int = 15) -> dict[str, Any] | None:
+    """Fetch JSON from a URL via the overseas proxy if configured."""
+    import os as _os
+    proxy = _os.getenv("OVERSEAS_PROXY_URL", "").strip()
+    if not proxy:
+        return None
+    secret = _os.getenv("PROXY_SECRET", "").strip()
+    import requests as _http
+    from urllib.parse import quote
+    try:
+        # URL-encode the target URL so query params go to the target, not the proxy
+        resp = _http.get(
+            f"{proxy.rstrip('/')}/fetch",
+            params={"url": url, "strategy": "json"},
+            headers={"X-Proxy-Key": secret} if secret else {},
+            timeout=timeout,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("status") == "ok" and data.get("content"):
+                import json as _json
+                return _json.loads(data["content"])
+    except Exception as exc:
+        logger.info("events proxy fetch failed for %s: %s", url[:60], exc)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # In-memory cache
 # ---------------------------------------------------------------------------
@@ -180,17 +212,29 @@ async def _fetch_polymarket_events(client: httpx.AsyncClient) -> list[dict[str, 
     """Fetch active events from Polymarket Gamma API.
 
     Returns flat list of event dicts with embedded market data.
+    Tries direct first, falls back to overseas proxy (Polymarket is blocked from CN).
     """
     url = f"{_POLYMARKET_GAMMA}/events"
     params = {
         "active": "true",
         "closed": "false",
         "limit": "80",
-        "volume_min": "5000",  # filter out noise
+        "volume_min": "5000",
     }
-    resp = await client.get(url, params=params, timeout=_API_TIMEOUT)
-    resp.raise_for_status()
-    raw_events = resp.json()
+    raw_events = None
+    # Try direct
+    try:
+        resp = await client.get(url, params=params, timeout=_API_TIMEOUT)
+        resp.raise_for_status()
+        raw_events = resp.json()
+    except Exception as exc:
+        logger.info("Polymarket direct failed: %s, trying proxy...", exc)
+    # Try proxy
+    if raw_events is None:
+        import asyncio
+        raw_events = await asyncio.to_thread(_proxy_get_json, url + "?active=true&closed=false&limit=80&volume_min=5000", _API_TIMEOUT)
+    if raw_events is None:
+        raise RuntimeError("Polymarket unavailable (direct + proxy both failed)")
 
     results: list[dict[str, Any]] = []
     for evt in raw_events:

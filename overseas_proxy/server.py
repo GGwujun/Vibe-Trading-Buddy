@@ -55,7 +55,7 @@ async def health() -> dict:
 @app.get("/fetch")
 async def fetch(
     url: str = Query(..., description="target URL to fetch"),
-    strategy: str = Query("raw", description="raw = direct requests; jina = via r.jina.ai"),
+    strategy: str = Query("raw", description="raw=direct; jina=via r.jina.ai; json=raw passthrough for APIs"),
     x_proxy_key: str | None = Header(None, alias="X-Proxy-Key"),
 ) -> JSONResponse:
     """Fetch a foreign page and return extracted text/markdown."""
@@ -63,7 +63,9 @@ async def fetch(
     if not re.match(r"^https?://", url, re.I):
         raise HTTPException(status_code=400, detail="url must start with http(s)://")
 
-    if strategy == "jina":
+    if strategy == "json":
+        text, title = _fetch_json(url)
+    elif strategy == "jina":
         text, title = _fetch_jina(url)
     else:
         text, title = _fetch_raw(url)
@@ -72,6 +74,18 @@ async def fetch(
         text = text[:_MAX_LENGTH] + f"\n\n... (truncated, total {len(text)} chars)"
 
     return JSONResponse({"status": "ok", "url": url, "title": title, "content": text, "length": len(text), "strategy": strategy})
+
+
+def _fetch_json(url: str) -> tuple[str, str]:
+    """Fetch raw response (for JSON APIs — no HTML parsing)."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 Chrome/120.0",
+        "Accept": "application/json,text/html,*/*",
+    }
+    resp = requests.get(url, headers=headers, timeout=_TIMEOUT, allow_redirects=True)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"upstream HTTP {resp.status_code}")
+    return resp.text, ""
 
 
 def _fetch_raw(url: str) -> tuple[str, str]:
