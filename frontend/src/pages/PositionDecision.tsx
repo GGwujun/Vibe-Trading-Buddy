@@ -663,7 +663,7 @@ function AiDecisionPanel({
   const blocked = isAiError(aiContent);
 
   return (
-    <aside className="flex min-h-0 w-full shrink-0 flex-col border-l bg-card/45 xl:w-[380px]">
+    <aside className="flex h-full min-h-0 w-full shrink-0 flex-col overflow-hidden border-l bg-card/45 xl:w-[380px]">
       <div className="flex items-center justify-between border-b p-4">
         <div>
           <p className="text-sm font-semibold">AI 决策 / 风控建议</p>
