@@ -194,6 +194,8 @@ class DataSourceSettingsResponse(BaseModel):
 
     tushare_token_configured: bool
     tushare_token_hint: Optional[str] = None
+    tpdog_token_configured: bool
+    tpdog_token_hint: Optional[str] = None
     baostock_supported: bool
     baostock_installed: bool
     baostock_message: str
@@ -205,6 +207,8 @@ class UpdateDataSourceSettingsRequest(BaseModel):
 
     tushare_token: Optional[str] = None
     clear_tushare_token: bool = False
+    tpdog_token: Optional[str] = None
+    clear_tpdog_token: bool = False
 
 
 # ---- V4 Session Models ----
@@ -540,7 +544,7 @@ _SPA_HTML_EXACT_PATHS: frozenset[str] = frozenset({
     "/news",
     "/opportunity",
     "/logic-chain",
-    "/position-decision",
+    "/tracking-dashboard",
 })
 # Each regex matches a complete request path. Trailing slash optional.
 _SPA_HTML_PATH_REGEX: tuple[re.Pattern[str], ...] = (
@@ -583,6 +587,22 @@ async def _run_startup_preflight() -> None:
     from src.preflight import run_preflight
 
     run_preflight(console)
+    # Start the market-data sync daemon (auto close-of-day backfill into the
+    # market SQLite DB). Idempotent; no-op if tpdog is unconfigured.
+    try:
+        from src.data.market_sync import start_market_sync_daemon
+        start_market_sync_daemon()
+    except Exception:  # noqa: BLE001 — daemon must never block startup
+        console.print("[yellow]market-sync daemon failed to start[/yellow]")
+
+    # Start the scheduled-analysis background loop (daily per-stock analysis
+    # at a configured Beijing HH:MM). Runs for the lifetime of the server.
+    try:
+        import asyncio as _asyncio
+        from src.data.schedule_runner import run_scheduler_loop
+        app.state.scheduler_task = _asyncio.create_task(run_scheduler_loop())
+    except Exception:  # noqa: BLE001 — scheduler must never block startup
+        console.print("[yellow]scheduled-analysis loop failed to start[/yellow]")
 
 
 # ============================================================================
@@ -803,6 +823,7 @@ LLM_PROVIDER_BY_NAME = {provider.name: provider for provider in LLM_PROVIDERS}
 LLM_REASONING_EFFORTS = {"", "low", "medium", "high", "max"}
 LLM_API_KEY_PLACEHOLDERS = {"", "sk-or-v1-your-key-here", "sk-xxx", "xxx", "gsk_xxx"}
 TUSHARE_TOKEN_PLACEHOLDERS = {"", "your-tushare-token"}
+TPDOG_TOKEN_PLACEHOLDERS = {"", "your-tpdog-token"}
 
 
 def _ensure_agent_env_file() -> Path:
@@ -971,6 +992,8 @@ def _build_data_source_settings_response(values: Optional[Dict[str, str]] = None
     env_values = values if values is not None else _read_settings_env_values()
     token = env_values.get("TUSHARE_TOKEN", "")
     token_configured = _is_configured_secret(token, TUSHARE_TOKEN_PLACEHOLDERS)
+    tpdog_token = env_values.get("TPDOG_TOKEN", "")
+    tpdog_configured = _is_configured_secret(tpdog_token, TPDOG_TOKEN_PLACEHOLDERS)
     supported = _baostock_supported()
     installed = _baostock_installed()
     if supported:
@@ -982,6 +1005,8 @@ def _build_data_source_settings_response(values: Optional[Dict[str, str]] = None
     return DataSourceSettingsResponse(
         tushare_token_configured=token_configured,
         tushare_token_hint=None,
+        tpdog_token_configured=tpdog_configured,
+        tpdog_token_hint=None,
         baostock_supported=supported,
         baostock_installed=installed,
         baostock_message=baostock_message,
@@ -1460,13 +1485,24 @@ async def update_data_source_settings(payload: UpdateDataSourceSettingsRequest):
     elif "TUSHARE_TOKEN" in current_values:
         updates["TUSHARE_TOKEN"] = current_values["TUSHARE_TOKEN"]
 
+    if payload.clear_tpdog_token:
+        updates["TPDOG_TOKEN"] = ""
+    elif payload.tpdog_token is not None and payload.tpdog_token.strip():
+        updates["TPDOG_TOKEN"] = payload.tpdog_token.strip()
+    elif "TPDOG_TOKEN" in current_values:
+        updates["TPDOG_TOKEN"] = current_values["TPDOG_TOKEN"]
+
     if updates:
         _write_env_values(ENV_PATH, updates)
-        token = updates.get("TUSHARE_TOKEN", "").strip()
-        if _is_configured_secret(token, TUSHARE_TOKEN_PLACEHOLDERS):
-            os.environ["TUSHARE_TOKEN"] = token
-        else:
-            os.environ.pop("TUSHARE_TOKEN", None)
+        for env_key, placeholders in (
+            ("TUSHARE_TOKEN", TUSHARE_TOKEN_PLACEHOLDERS),
+            ("TPDOG_TOKEN", TPDOG_TOKEN_PLACEHOLDERS),
+        ):
+            value = updates.get(env_key, "").strip()
+            if _is_configured_secret(value, placeholders):
+                os.environ[env_key] = value
+            else:
+                os.environ.pop(env_key, None)
 
     return _build_data_source_settings_response(_read_env_values(ENV_PATH))
 
@@ -3104,6 +3140,14 @@ register_position_routes(app, require_auth, require_event_stream_auth)
 
 
 # ============================================================================
+# Scheduled Analysis routes (Web UI) — defined in src/api/scheduled_analysis_routes.py
+# ============================================================================
+
+from src.api.scheduled_analysis_routes import register_scheduled_analysis_routes  # noqa: E402
+register_scheduled_analysis_routes(app, require_auth, require_event_stream_auth)
+
+
+# ============================================================================
 # News routes (Web UI) — defined in src/api/news_routes.py
 # ============================================================================
 
@@ -3154,6 +3198,21 @@ register_credits_routes(app)
 
 from src.api.notify_routes import register_notify_routes  # noqa: E402
 register_notify_routes(app, require_auth, require_event_stream_auth)
+
+
+# ============================================================================
+# Data-source health check (admin only) — single pane of glass for which
+# upstream (mootdx / akshare / RSSHub / overseas proxy) is reachable from this
+# host. Critical for diagnosing cloud deployments where some sources 403/timeout.
+# ============================================================================
+from src.api.data_health_routes import register_data_health_routes  # noqa: E402
+register_data_health_routes(app)
+
+from src.api.tpdog_routes import register_tpdog_routes  # noqa: E402
+register_tpdog_routes(app)
+
+from src.api.market_sync_routes import register_market_sync_routes  # noqa: E402
+register_market_sync_routes(app)
 
 
 # ============================================================================

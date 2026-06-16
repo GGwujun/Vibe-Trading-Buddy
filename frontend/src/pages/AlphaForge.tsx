@@ -521,7 +521,7 @@ function NewAnalysisView({
               <li className="flex gap-2"><span className="font-mono text-primary">1.</span>先从机会清单或新闻页发现标的。</li>
               <li className="flex gap-2"><span className="font-mono text-primary">2.</span>用逻辑链做快速初筛。</li>
               <li className="flex gap-2"><span className="font-mono text-primary">3.</span>用 AlphaForge 生成正式报告。</li>
-              <li className="flex gap-2"><span className="font-mono text-primary">4.</span>把结论带入持仓决策或策略验证。</li>
+              <li className="flex gap-2"><span className="font-mono text-primary">4.</span>把结论带入跟踪看板或策略验证。</li>
             </ol>
           </Panel>
         </aside>

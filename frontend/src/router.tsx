@@ -25,8 +25,11 @@ const AlphaZoo = lazy(() =>
 const Events = lazy(() =>
   import("@/pages/Events").then((m) => ({ default: m.Events })),
 );
-const PositionDecision = lazy(() =>
-  import("@/pages/PositionDecision").then((m) => ({ default: m.PositionDecision })),
+const TrackingDashboard = lazy(() =>
+  import("@/pages/TrackingDashboard").then((m) => ({ default: m.TrackingDashboard })),
+);
+const WatchlistSchedule = lazy(() =>
+  import("@/pages/WatchlistSchedule").then((m) => ({ default: m.WatchlistSchedule })),
 );
 const News = lazy(() =>
   import("@/pages/News").then((m) => ({ default: m.News })),
@@ -124,7 +127,8 @@ export const router = createBrowserRouter([
           { path: "/compare", element: wrap(Compare) },
           { path: "/correlation", element: wrap(Correlation) },
           { path: "/events", element: wrap(Events) },
-          { path: "/position-decision", element: wrap(PositionDecision) },
+          { path: "/tracking-dashboard", element: wrap(TrackingDashboard) },
+          { path: "/watchlist-schedule", element: wrap(WatchlistSchedule) },
           { path: "/news", element: wrap(News) },
           { path: "/opportunity", element: wrap(Opportunity) },
           { path: "/logic-chain", element: wrap(LogicChain) },

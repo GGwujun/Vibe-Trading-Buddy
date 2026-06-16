@@ -271,8 +271,8 @@ def _mootdx_quotes_serial(codes: list[str], limit_codes: int = 120) -> dict[str,
     would take minutes. Caller should pre-sort codes by likely activity.
     """
     try:
-        from mootdx.quotes import Quotes
-        client = Quotes.factory(market="std", timeout=10)
+        from src.data.mootdx_helper import get_quotes
+        client = get_quotes(timeout=10)
     except Exception as exc:
         logger.warning("fund_premium: mootdx init failed: %s", exc)
         return {}
@@ -336,11 +336,48 @@ def _akshare_sina_prices() -> dict[str, dict[str, Any]]:
     return out
 
 
+def _tpdog_etf_prices(codes: list[str]) -> dict[str, dict[str, Any]]:
+    """Fetch latest-day ETF close + turnover from tpdog (mootdx/sina fallback).
+
+    tpdog ``etf/daily`` returns the latest trading day's K-line per fund (1 积分
+    each). Used when mootdx TDX port is blocked and before falling back to the
+    ~27s sina full-market scan. Only ETF/LOF codes are sent (6-digit, 沪/深).
+    Returns {code: {price, pre_close, amount}}.
+    """
+    try:
+        from src.data.tpdog_client import call
+    except Exception:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for code in codes:
+        if _fund_market(code) is None:
+            continue
+        try:
+            content = call("etf/daily", code=f"etf.{code}")
+        except Exception as exc:  # noqa: BLE001 — best-effort, never raise
+            logger.debug("fund_premium: tpdog etf/daily %s failed: %s", code, exc)
+            continue
+        # tpdog returns a single object (not a list) for etf/daily.
+        row = content if isinstance(content, dict) else (content[0] if content else None)
+        if not row:
+            continue
+        close = _safe_float(row.get("close"))
+        if close <= 0:
+            continue
+        rise = _safe_float(row.get("rise"))
+        out[code] = {
+            "price": close,
+            "pre_close": round(close - rise, 4) if rise else 0.0,
+            "amount": _safe_float(row.get("total_amt")),
+        }
+    return out
+
+
 def _fetch_via_ths_mootdx(fund_kind: str, limit: int) -> list[dict[str, Any]]:
     """Fallback path: ths NAV list + mootdx serial quotes for top-N codes.
 
-    If mootdx is unavailable (firewall blocks TDX port 7709 on Aliyun), falls
-    back to akshare sina spot prices.
+    Fallback chain for prices: mootdx (TDX port) → tpdog ETF 日K (HTTPS) →
+    akshare sina spot (full market, ~27s).
     """
     nav_map = _fetch_ths_nav(fund_kind)
     if not nav_map:
@@ -348,7 +385,10 @@ def _fetch_via_ths_mootdx(fund_kind: str, limit: int) -> list[dict[str, Any]]:
     codes = list(nav_map.keys())[:limit * 3]
     prices = _mootdx_quotes_serial(codes, limit_codes=limit * 2)
     if not prices:
-        # mootdx unavailable → use akshare sina spot as fallback
+        # mootdx unavailable → tpdog ETF 日K (HTTPS, per-fund)
+        prices = _tpdog_etf_prices(codes)
+    if not prices:
+        # tpdog also unavailable → akshare sina full-market scan
         prices = _akshare_sina_prices()
     rows: list[dict[str, Any]] = []
     for code, pinfo in prices.items():
@@ -451,8 +491,8 @@ def scan_source_status() -> dict[str, Any]:
     except Exception:
         status["ths"] = False
     try:
-        from mootdx.quotes import Quotes
-        c = Quotes.factory(market="std", timeout=8)
+        from src.data.mootdx_helper import get_quotes
+        c = get_quotes(timeout=8)
         status["mootdx"] = c is not None
     except Exception:
         status["mootdx"] = False
@@ -470,9 +510,12 @@ def get_fund_detail(code: str) -> dict[str, Any]:
         return {"status": "error", "error": f"{code} 不是有效的场内基金代码"}
     ftype = _fund_type(code)
 
-    # Price: single mootdx quote (fast)
+    # Price: single mootdx quote (fast), fall back to tpdog ETF 日K (HTTPS)
     prices = _mootdx_quotes_serial([code], limit_codes=1)
     pinfo = prices.get(code)
+    if not pinfo:
+        prices = _tpdog_etf_prices([code])
+        pinfo = prices.get(code)
     if not pinfo:
         return {"status": "error", "error": f"未取到 {code} 的场内实时价"}
     price = pinfo["price"]

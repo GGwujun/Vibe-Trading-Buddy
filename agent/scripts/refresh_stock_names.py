@@ -1,7 +1,7 @@
 """One-shot script: refresh stock name cache from mootdx."""
 import json
 from pathlib import Path
-from mootdx.quotes import Quotes
+from src.data.mootdx_helper import get_quotes
 
 cache_dir = Path.home() / ".vibe-trading" / "cache"
 cache_dir.mkdir(parents=True, exist_ok=True)
@@ -9,7 +9,7 @@ cache_file = cache_dir / "stock_names.json"
 
 NULL_BYTE = chr(0)
 names = {}
-client = Quotes.factory(market="std", timeout=15)
+client = get_quotes(timeout=15)
 for market_id, suffix in [(0, ".SZ"), (1, ".SH")]:
     df = client.stocks(market=market_id)
     if df is not None and not df.empty:

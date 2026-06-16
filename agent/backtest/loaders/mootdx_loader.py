@@ -84,8 +84,8 @@ class DataLoader:
 
     def _get_client(self):
         if self._client is None:
-            from mootdx.quotes import Quotes
-            self._client = Quotes.factory(market="std")
+            from src.data.mootdx_helper import get_quotes
+            self._client = get_quotes(timeout=15)
         return self._client
 
     def fetch(

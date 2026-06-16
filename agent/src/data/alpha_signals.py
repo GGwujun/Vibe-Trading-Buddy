@@ -80,8 +80,8 @@ def _get_peer_codes(code: str, min_peers: int = 10, max_peers: int = 50) -> list
 
     peers: list[str] = []
     try:
-        from mootdx.quotes import Quotes
-        client = Quotes.factory(market="std", timeout=10)
+        from src.data.mootdx_helper import get_quotes
+        client = get_quotes(timeout=10)
         blocks = client.block()
         if blocks and isinstance(blocks, dict):
             for bk_name, bk_data in blocks.items():

@@ -26,6 +26,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
                 "MAX_RETRIES=3",
                 "LANGCHAIN_REASONING_EFFORT=max",
                 "TUSHARE_TOKEN=your-tushare-token",
+                "TPDOG_TOKEN=your-tpdog-token",
             ]
         )
         + "\n",
@@ -123,6 +124,8 @@ def test_get_data_source_settings_treats_placeholder_as_unconfigured(
     body = response.json()
     assert body["tushare_token_configured"] is False
     assert body["tushare_token_hint"] is None
+    assert body["tpdog_token_configured"] is False
+    assert body["tpdog_token_hint"] is None
     assert body["baostock_supported"] is False
     assert body["baostock_installed"] is False
     assert not Path(body["env_path"]).is_absolute()
@@ -139,6 +142,7 @@ def test_settings_response_never_exposes_configured_secret_hints(
                 "LANGCHAIN_PROVIDER=openrouter",
                 "OPENROUTER_API_KEY=or-secret-private-value",
                 "TUSHARE_TOKEN=ts-secret-private-token",
+                "TPDOG_TOKEN=tp-secret-private-token",
             ]
         )
         + "\n",
@@ -156,10 +160,14 @@ def test_settings_response_never_exposes_configured_secret_hints(
     assert llm_body["api_key_hint"] is None
     assert data_body["tushare_token_configured"] is True
     assert data_body["tushare_token_hint"] is None
+    assert data_body["tpdog_token_configured"] is True
+    assert data_body["tpdog_token_hint"] is None
     assert "or-secret-private-value" not in llm_response.text
     assert "or-s...alue" not in llm_response.text
     assert "ts-secret-private-token" not in data_response.text
     assert "ts-s...oken" not in data_response.text
+    assert "tp-secret-private-token" not in data_response.text
+    assert "tp-s...oken" not in data_response.text
 
 
 def test_settings_reads_reject_remote_dev_mode_clients(
@@ -245,6 +253,25 @@ def test_update_data_source_settings_persists_tushare_token(
 
     env_text = (tmp_path / ".env").read_text(encoding="utf-8")
     assert "TUSHARE_TOKEN=ts-secret-token" in env_text
+
+
+def test_update_data_source_settings_persists_tpdog_token(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    response = client.put(
+        "/settings/data-sources",
+        json={"tpdog_token": "tp-secret-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tpdog_token_configured"] is True
+    assert body["tpdog_token_hint"] is None
+    assert "tp-secret-token" not in response.text
+    assert "tp-s...oken" not in response.text
+
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "TPDOG_TOKEN=tp-secret-token" in env_text
 
 
 def test_settings_writes_reject_remote_dev_mode_clients(

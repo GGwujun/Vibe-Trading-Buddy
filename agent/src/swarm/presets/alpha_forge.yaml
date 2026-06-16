@@ -712,6 +712,66 @@ agents:
     timeout_seconds: 1200
     max_retries: 1
 
+  # ═══════════════════════════════════════════════════════════
+  # Layer 3b — 多空第二轮：互读对方初稿后反驳（真辩论）
+  # ═══════════════════════════════════════════════════════════
+
+  - id: bull_rebuttal
+    role: 多方反驳研究员（第二轮）
+    system_prompt: |
+      你是买方基金的多方反驳研究员。空方首席刚刚提交了完整的空头论据（见上游 bear_case 报告）。你的任务不是重复多方立场，而是**逐条正面回击空方的每一个论点**，用数据证明它要么被夸大、要么已定价、要么可对冲。
+
+      ## 辩论规则（硬性）
+      - 必须**逐条**回应空方论据，不可笼统否定。格式：「空方论点X：... → 我方反驳：...（数据/逻辑）」
+      - 诚实承认空方**确实成立**的点——强行否认所有风险会损害可信度。承认时说明影响有多大。
+      - 凡是被空方击穿的假设，必须给出修正后的多方立场，而不是死守原观点。
+
+      ## 任务
+      阅读 {target}（market: {market}）的质量门控研究 + 空方报告，提交多方第二轮反驳。
+
+      {upstream_context}
+
+      ## 输出（写入 report.md）
+      1. **辩论清算表**：逐条回应空方 5 大风险点（成立/部分成立/不成立 + 反驳依据）
+      2. **被击穿假设的修正**：原多方论据中哪些需要降级，修正后怎么看
+      3. **净评估**：经过两轮交锋，多方立场的置信度（高/中/低）+ 核心理由
+      4. **修订目标价**：若承认了部分风险，给出修正后的多方目标价
+
+      回复用中文。这是一场对抗性辩论，不是自我安慰——用证据说话。
+    tools: [read_file, write_file, load_skill]
+    skills: [strategy-generate]
+    max_iterations: 35
+    timeout_seconds: 1200
+    max_retries: 1
+
+  - id: bear_rebuttal
+    role: 空方反驳研究员（第二轮）
+    system_prompt: |
+      你是买方基金的空方反驳研究员。多方首席刚刚提交了完整的多头论据（见上游 bull_case 报告）。你的任务不是重复空头立场，而是**逐条攻击多方的每一个论点**，暴露其最脆弱的假设和被高估的催化剂。
+
+      ## 辩论规则（硬性）
+      - 必须**逐条**攻击多方论据，不可笼统看空。格式：「多方论点X：... → 空方反击：...（数据/逻辑）」
+      - 诚实承认多方**确实有理**的点——盲目看空会漏掉真实机会。承认时说明该利好值多少。
+      - 对多方目标价做压力测试：在哪些条件下目标价无法兑现。
+
+      ## 任务
+      阅读 {target}（market: {market}）的质量门控研究 + 多方报告，提交空方第二轮反驳。
+
+      {upstream_context}
+
+      ## 输出（写入 report.md）
+      1. **辩论清算表**：逐条攻击多方 5 大看多论据（高估/合理/低估 + 反击依据）
+      2. **多方假设的压力测试**：多方依赖的关键假设中，哪些最可能落空
+      3. **净评估**：经过两轮交锋，空方立场的置信度（高/中/低）+ 核心理由
+      4. **修订下行目标价**：若承认了部分利好，给出修正后的空方目标价
+
+      回复用中文。对抗性辩论，用证据说话。
+    tools: [read_file, write_file, load_skill]
+    skills: [risk-analysis, volatility]
+    max_iterations: 35
+    timeout_seconds: 1200
+    max_retries: 1
+
   - id: neutral_synthesis
     role: 中立综合分析师
     system_prompt: |
@@ -813,6 +873,12 @@ agents:
       4. **Risk Parameters**: max loss, holding period, monitoring triggers
       5. **Market Microstructure**: liquidity assessment, T+1 impact,涨跌停 risk
       6. **FINAL TRANSACTION PROPOSAL**: BUY / SELL / HOLD (machine-readable)
+
+      ## 机读结论块（必须，放在报告最末）
+      在 report.md 末尾追加一行机读块，字段含义：action=BUY/SELL/HOLD，entry=入场价，target=目标价，
+      stop=止损价，size_pct=建议仓位占组合百分比(0-100)，horizon=持有周期(如 "2-4周")。
+      价格为 0 表示该字段不适用（如 HOLD 无 target）。格式严格如下，单行，JSON 值不要带单位：
+      <!-- DECISION: {"action":"BUY","entry":23.50,"target":28.00,"stop":21.00,"size_pct":15,"horizon":"2-4周"} -->
 
       Respond in Chinese. Every price must be justified by upstream analysis or your own calculation.
     tools: [read_file, write_file, load_skill, backtest]
@@ -938,6 +1004,11 @@ agents:
       6. **证伪条件**: what would prove this decision wrong
       7. **复审触发**: when to re-evaluate this call
       8. **最终交易决策备忘录**: formal memo format addressed to trading execution team
+
+      ## 机读裁决块（必须，放在报告最末）
+      rating=Overweight/Equal-weight/Underweight；action 是对应的交易动作 BUY/HOLD/SELL。
+      若 PM 调整了 trader 的价格，写 PM 最终认可的价格（未调整则沿用 trader）；价格为 0 表示不适用。
+      <!-- VERDICT: {"rating":"Overweight","action":"BUY","entry":23.50,"target":28.00,"stop":21.00,"size_pct":15} -->
 
       This is the FINAL output of the entire AlphaForge pipeline. Be definitive. No "it depends."
       Respond in Chinese.
@@ -1171,21 +1242,42 @@ tasks:
     input_from:
       quality_gate_synthesis: task-quality-gate
 
+  # ── Layer 3b: 第二轮反驳（真辩论——互读对方初稿后逐条回击）──
+  - id: task-bull-rebuttal
+    agent_id: bull_rebuttal
+    prompt_template: "Read the bear-side's opening case (upstream bear_case) and rebut EACH of its risk points with data. Acknowledge points that genuinely hold, and revise the bull stance where the bear has pierced your assumptions. Market: {market}."
+    depends_on: [task-bull, task-bear]
+    input_from:
+      bear_case: task-bear
+      my_opening: task-bull
+
+  - id: task-bear-rebuttal
+    agent_id: bear_rebuttal
+    prompt_template: "Read the bull-side's opening case (upstream bull_case) and attack EACH of its bull points. Expose the most fragile assumptions, stress-test the bull target price, and acknowledge where the bull is genuinely right. Market: {market}."
+    depends_on: [task-bull, task-bear]
+    input_from:
+      bull_case: task-bull
+      my_opening: task-bear
+
   - id: task-neutral
     agent_id: neutral_synthesis
-    prompt_template: "Synthesize the quality-gated research on {target} into a balanced, probability-weighted assessment. Weigh bull vs bear evidence, identify blind spots, produce 3-scenario analysis with explicit probabilities. Market: {market}."
-    depends_on: [task-quality-gate]
+    prompt_template: "Synthesize the quality-gated research on {target} into a balanced, probability-weighted assessment. Weigh bull vs bear evidence INCLUDING the two rebuttal rounds, identify blind spots, produce 3-scenario analysis with explicit probabilities. Market: {market}."
+    depends_on: [task-bull-rebuttal, task-bear-rebuttal]
     input_from:
       quality_gate_synthesis: task-quality-gate
+      bull_rebuttal: task-bull-rebuttal
+      bear_rebuttal: task-bear-rebuttal
 
-  # ── Layer 4: Trading decision (depends on all 3 debate outputs) ──
+  # ── Layer 4: Trading decision (depends on the full 2-round debate) ──
   - id: task-trader
     agent_id: trader
-    prompt_template: "Make a concrete trading decision on {target} based on the bull-bear-neutral debate. Choose BUY/SELL/HOLD, set specific entry/exit prices, position size, stop-loss, and take-profit. Consider A-share T+1 and 涨跌停 constraints. Market: {market}."
-    depends_on: [task-bull, task-bear, task-neutral]
+    prompt_template: "Make a concrete trading decision on {target} based on the full bull-bear debate INCLUDING both rebuttal rounds. Choose BUY/SELL/HOLD, set specific entry/exit prices, position size, stop-loss, and take-profit. Consider A-share T+1 and 涨跌停 constraints. Market: {market}."
+    depends_on: [task-bull, task-bear, task-bull-rebuttal, task-bear-rebuttal, task-neutral]
     input_from:
       bull_case: task-bull
       bear_case: task-bear
+      bull_rebuttal: task-bull-rebuttal
+      bear_rebuttal: task-bear-rebuttal
       neutral_synthesis: task-neutral
 
   # ── Layer 5: Risk assessment (depends on trader decision) ──
@@ -1208,8 +1300,8 @@ tasks:
   # ── Layer 7: Report writer (depends on ALL upstream — writes the final unified report) ──
   - id: task-report
     agent_id: report_writer
-    prompt_template: "Read ALL upstream agent outputs (research + quality gate + debate + trader + CRO + PM) and write ONE coherent unified research report for {target} following the strict report skeleton in your system prompt. This is the only artifact the user reads. Market: {market}."
-    depends_on: [task-technical, task-sentiment, task-news, task-fundamental, task-policy, task-capital-flow, task-lockup, task-quality-gate, task-bull, task-bear, task-neutral, task-trader, task-risk, task-decision]
+    prompt_template: "Read ALL upstream agent outputs (research + quality gate + debate + rebuttals + trader + CRO + PM) and write ONE coherent unified research report for {target} following the strict report skeleton in your system prompt. This is the only artifact the user reads. Market: {market}."
+    depends_on: [task-technical, task-sentiment, task-news, task-fundamental, task-policy, task-capital-flow, task-lockup, task-quality-gate, task-bull, task-bear, task-bull-rebuttal, task-bear-rebuttal, task-neutral, task-trader, task-risk, task-decision]
     input_from:
       technical: task-technical
       sentiment: task-sentiment
@@ -1221,6 +1313,8 @@ tasks:
       quality_gate: task-quality-gate
       bull: task-bull
       bear: task-bear
+      bull_rebuttal: task-bull-rebuttal
+      bear_rebuttal: task-bear-rebuttal
       neutral: task-neutral
       trader: task-trader
       risk: task-risk

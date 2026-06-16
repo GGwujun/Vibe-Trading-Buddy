@@ -88,8 +88,8 @@ def _f10_section_text(code: str, section_kw: str) -> str | None:
         return None
 
     try:
-        from mootdx.quotes import Quotes
-        client = Quotes.factory(market="std", timeout=12)
+        from src.data.mootdx_helper import get_quotes
+        client = get_quotes(timeout=12)
         data = client.F10(raw_code)
         if not isinstance(data, dict) or not data:
             return None
@@ -225,8 +225,8 @@ def _layer_industry(code: str) -> dict[str, Any]:
 
     # 2b. Sector trend via stock block
     try:
-        from mootdx.quotes import Quotes
-        client = Quotes.factory(market="std", timeout=10)
+        from src.data.mootdx_helper import get_quotes
+        client = get_quotes(timeout=10)
         blocks = client.block()
         found_blocks = []
         if blocks is not None and isinstance(blocks, dict):

@@ -1,6 +1,6 @@
 ﻿import { useEffect, useState } from "react";
 import { Link, Outlet, useLocation, useSearchParams } from "react-router-dom";
-import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Settings, Layers, Loader2, TrendingUp, Target, Newspaper, Lightbulb, GitBranch, Zap, Coins, Search, User } from "lucide-react";
+import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Settings, Layers, Loader2, TrendingUp, Target, Newspaper, Lightbulb, GitBranch, Zap, Coins, Search, User, CalendarClock } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDarkMode } from "@/hooks/useDarkMode";
 import { api, type SessionItem } from "@/lib/api";
@@ -31,6 +31,13 @@ const NAV_GROUPS = [
     ],
   },
   {
+    title: "交易决策",
+    items: [
+      { to: "/tracking-dashboard", icon: Target, label: "跟踪看板" },
+      { to: "/watchlist-schedule", icon: CalendarClock, label: "自选 & 定时" },
+    ],
+  },
+  {
     title: "市场情报",
     items: [
       { to: "/news", icon: Newspaper, label: "新闻线索" },
@@ -39,12 +46,6 @@ const NAV_GROUPS = [
       { to: "/logic-chain", icon: GitBranch, label: "逻辑链" },
       { to: "/fund-opportunity", icon: Search, label: "套利机会" },
       { to: "/correlation", icon: BarChart3, label: "相关性矩阵" },
-    ],
-  },
-  {
-    title: "交易决策",
-    items: [
-      { to: "/position-decision", icon: Target, label: "持仓决策" },
     ],
   },
   {

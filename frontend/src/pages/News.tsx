@@ -276,7 +276,7 @@ export function News() {
                 {stockLoading && <span className="text-xs text-muted-foreground">加载中</span>}
               </div>
               {watchlistStocks.length === 0 ? (
-                <p className="text-xs text-muted-foreground">暂无自选股，可先在持仓决策中维护关注标的。</p>
+                <p className="text-xs text-muted-foreground">暂无自选股，可先在跟踪看板中维护关注标的。</p>
               ) : (
                 <div className="space-y-1">
                   {watchlistStocks.map((item) => (

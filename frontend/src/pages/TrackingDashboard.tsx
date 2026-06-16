@@ -74,6 +74,18 @@ function fmtMoney(value: number): string {
   return `${sign}${abs.toFixed(0)}`;
 }
 
+function fmtMarketPrice(value: number | undefined): string {
+  if (value === undefined || value === null || Number.isNaN(value) || value === 0) return "-";
+  return `¥${fmtPrice(value)}`;
+}
+
+function fmtVolume(value: number | undefined): string {
+  if (!value || value <= 0) return "-";
+  // 成交量单位：手（1 手 = 100 股）。数据源返回的是"手"。
+  if (value >= 10000) return `${(value / 10000).toFixed(1)}万手`;
+  return `${value}手`;
+}
+
 function confidenceLabel(value: string): string {
   if (value === "high") return "高置信";
   if (value === "medium") return "中置信";
@@ -271,7 +283,7 @@ function HeaderBar({
     <div className="shrink-0 border-b px-4 py-3 md:px-6">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">持仓决策</h1>
+          <h1 className="text-xl font-semibold tracking-tight">跟踪看板</h1>
           <p className="mt-1 text-xs text-muted-foreground">持仓信号、AI 决策与风控建议。</p>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -565,11 +577,19 @@ function SignalDetailPanel({
             </div>
           </div>
 
-          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
             <InfoCard label="持仓成本" value={position?.cost ? `¥${fmtPrice(position.cost)}` : "未填写"} />
             <InfoCard label="持仓数量" value={position?.shares ? `${position.shares} 股` : "观察标的"} />
             <InfoCard label="持仓市值" value={position?.shares ? fmtMoney(stats.value) : "-"} />
             <InfoCard label="持仓盈亏" value={position?.shares ? `${fmtPnL(stats.pnl)} (${fmtPct(stats.pnlPct)})` : "-"} tone={stats.pnl >= 0 ? "up" : "down"} />
+          </div>
+
+          <div className="mt-2 grid gap-2 sm:grid-cols-3 lg:grid-cols-5">
+            <InfoCard label="今开" value={fmtMarketPrice(signal.market_basics?.open)} />
+            <InfoCard label="昨收" value={fmtMarketPrice(signal.market_basics?.prev_close)} />
+            <InfoCard label="日高" value={fmtMarketPrice(signal.market_basics?.high)} tone="up" />
+            <InfoCard label="日低" value={fmtMarketPrice(signal.market_basics?.low)} tone="down" />
+            <InfoCard label="成交量" value={fmtVolume(signal.market_basics?.volume)} />
           </div>
         </section>
 
@@ -611,9 +631,9 @@ function SignalDetailPanel({
 
 function InfoCard({ label, value, tone }: { label: string; value: string; tone?: "up" | "down" }) {
   return (
-    <div className="rounded-lg bg-muted/35 p-3">
+    <div className="rounded-md bg-muted/35 px-2.5 py-1.5">
       <p className="text-[10px] text-muted-foreground">{label}</p>
-      <p className={cn("mt-1 text-sm font-semibold tabular-nums", tone === "up" && "text-success", tone === "down" && "text-danger")}>{value}</p>
+      <p className={cn("mt-0.5 text-xs font-semibold tabular-nums", tone === "up" && "text-success", tone === "down" && "text-danger")}>{value}</p>
     </div>
   );
 }
@@ -828,7 +848,7 @@ function PageState({
   return null;
 }
 
-export function PositionDecision() {
+export function TrackingDashboard() {
   const { dark } = useDarkMode();
   const [positions, setPositions] = useState<Position[]>([]);
   const [watchlistReady, setWatchlistReady] = useState(false);
@@ -976,6 +996,10 @@ export function PositionDecision() {
     setPositions(next);
     savePositions(next);
     resetAddForm();
+    // 同步：持仓股自动加入定时分析任务（默认 15:05 / 短线 / 开启）
+    api
+      .createTrackingTask({ symbol: code, horizon: "短线", time: "15:05", enabled: true })
+      .catch(() => {});
     setLoading(true);
     api.analyzePositions({ symbols: next.map((pos) => pos.symbol) })
       .then((res) => {
@@ -992,6 +1016,8 @@ export function PositionDecision() {
     setPositions(next);
     savePositions(next);
     api.removeWatchlistItem(code).catch(() => {});
+    // 同步：删除持仓时一并删除定时分析任务（及其历史）
+    api.deleteTrackingTaskBySymbol(code).catch(() => {});
     if (selected?.symbol === code) setSelected(null);
     if (!next.length) {
       setSignals([]);

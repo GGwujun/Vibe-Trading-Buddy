@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { Bell, Database, KeyRound, Loader2, RotateCcw, Save, Send, Server, ShieldCheck, SlidersHorizontal } from "lucide-react";
+import { Bell, Database, KeyRound, Loader2, RotateCcw, Save, Send, Server, ShieldCheck, SlidersHorizontal, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
-import { api, isAuthRequiredError, type DataSourceSettings, type LLMProviderOption, type LLMSettings, type NotifyConfig, type PlatformConfig } from "@/lib/api";
+import { api, isAuthRequiredError, type DataSourceSettings, type DataHealthReport, type SourceHealth, type LLMProviderOption, type LLMSettings, type NotifyConfig, type PlatformConfig } from "@/lib/api";
 import { getApiAuthKey, isAdmin, setApiAuthKey } from "@/lib/apiAuth";
 import { cn } from "@/lib/utils";
 
@@ -45,6 +45,8 @@ export function Settings() {
   const [clearApiKey, setClearApiKey] = useState(false);
   const [tushareToken, setTushareToken] = useState("");
   const [clearTushareToken, setClearTushareToken] = useState(false);
+  const [tpdogToken, setTpdogToken] = useState("");
+  const [clearTpdogToken, setClearTpdogToken] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [dataSaving, setDataSaving] = useState(false);
@@ -141,10 +143,14 @@ export function Settings() {
       const updated = await api.updateDataSourceSettings({
         tushare_token: tushareToken.trim() || undefined,
         clear_tushare_token: clearTushareToken,
+        tpdog_token: tpdogToken.trim() || undefined,
+        clear_tpdog_token: clearTpdogToken,
       });
       setDataSettings(updated);
       setTushareToken("");
       setClearTushareToken(false);
+      setTpdogToken("");
+      setClearTpdogToken(false);
       toast.success("数据源配置已保存");
     } catch (error) {
       toast.error(`保存数据源配置失败：${unknownError(error)}`);
@@ -214,6 +220,9 @@ export function Settings() {
         : "该供应商不需要 API 密钥";
   const apiKeyDisabled = !selectedProvider?.api_key_required || clearApiKey;
   const tushareStatus = dataSettings.tushare_token_configured
+    ? "已配置"
+    : "留空表示保留当前 Token";
+  const tpdogStatus = dataSettings.tpdog_token_configured
     ? "已配置"
     : "留空表示保留当前 Token";
 
@@ -455,6 +464,37 @@ export function Settings() {
                 </div>
               </label>
 
+              <label className="grid gap-2">
+                <span className={labelClass}>TPDog Token（托普量化）</span>
+                <div className="relative">
+                  <KeyRound className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                  <input
+                    type="password"
+                    value={tpdogToken}
+                    onChange={(event) => setTpdogToken(event.target.value)}
+                    className={`${fieldClass} pl-9`}
+                    placeholder={tpdogStatus}
+                    autoComplete="current-password"
+                    disabled={clearTpdogToken}
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className={hintClass}>HTTPS 行情/资金流/龙虎榜/股池接口，作 mootdx 的稳定备用源（云主机不依赖 TDX 服务器）。</span>
+                  <label className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={clearTpdogToken}
+                      onChange={(event) => {
+                        setClearTpdogToken(event.target.checked);
+                        if (event.target.checked) setTpdogToken("");
+                      }}
+                      className="h-3.5 w-3.5 accent-primary"
+                    />
+                    清除已保存 Token
+                  </label>
+                </div>
+              </label>
+
               <ConfigPath label="数据源配置写入" path={dataSettings.env_path} />
 
               <button
@@ -485,8 +525,86 @@ export function Settings() {
           </div>
         </Section>
       </form>
+
+      <DataHealthSection />
         </>
       )}
+    </div>
+  );
+}
+
+/* ─── Data-source health (admin) ─── */
+
+function DataHealthSection() {
+  const [report, setReport] = useState<DataHealthReport | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = () => {
+    setLoading(true);
+    api.getDataHealth()
+      .then(setReport)
+      .catch((e) => toast.error(`数据源健康检查失败：${unknownError(e)}`))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { refresh(); }, []);
+
+  return (
+    <Section
+      icon={Server}
+      title="数据源健康检查"
+      desc="实时探测各数据源在本服务器的连通性。部署到阿里云等云主机时，从这里定位哪个数据源被限速 / 封禁 / 超时。"
+    >
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <span className="text-sm text-muted-foreground">
+          {report ? (
+            <>正常 <span className="font-medium text-success">{report.summary_ok}</span> / {report.summary_total}</>
+          ) : loading ? (
+            "正在探测…"
+          ) : (
+            "尚未检测"
+          )}
+        </span>
+        <button
+          type="button"
+          onClick={refresh}
+          disabled={loading}
+          className="inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm font-medium transition hover:bg-muted disabled:opacity-60"
+        >
+          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+          重新检测
+        </button>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {(report?.sources ?? []).map((s) => (
+          <HealthCard key={s.name} source={s} />
+        ))}
+        {report && report.sources.length === 0 && (
+          <div className="col-span-full rounded-md border bg-muted/20 p-4 text-sm text-muted-foreground">
+            没有可探测的数据源。
+          </div>
+        )}
+      </div>
+    </Section>
+  );
+}
+
+function HealthCard({ source }: { source: SourceHealth }) {
+  return (
+    <div className="rounded-md border bg-muted/20 p-3">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="text-sm font-medium text-foreground">{source.name}</span>
+        <span className={cn(
+          "rounded-full px-2 py-0.5 text-xs",
+          source.ok ? "bg-success/10 text-success" : "bg-destructive/10 text-destructive",
+        )}>
+          {source.ok ? "正常" : "异常"}
+        </span>
+      </div>
+      <div className="space-y-1 text-xs text-muted-foreground">
+        <div>延迟 {source.latency_ms} ms</div>
+        <div className={cn("break-words", !source.ok && "text-destructive/80")}>{source.detail || "—"}</div>
+      </div>
     </div>
   );
 }

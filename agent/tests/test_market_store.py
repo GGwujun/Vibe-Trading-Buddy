@@ -1,0 +1,85 @@
+"""Tests for the market-data SQLite store."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from src.data.market_store import MarketStore
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> MarketStore:
+    s = MarketStore(tmp_path / "market.db")
+    yield s
+    s._conn.close()
+
+
+def _row(date: str, close: float = 1.0) -> dict:
+    return {"date": date, "open": 1, "high": 1, "low": 1, "close": close,
+            "volume": 1, "total_amt": 1, "rise_rate": 0.5, "t_rate": 0.1, "name": "X"}
+
+
+def test_init_is_idempotent(store: MarketStore) -> None:
+    # Second init must not raise (CREATE TABLE IF NOT EXISTS).
+    store._init_db()
+    store._init_db()
+
+
+def test_upsert_and_get_daily(store: MarketStore) -> None:
+    n = store.upsert_daily_bars("600206.SH", [_row("2026-06-10"), _row("2026-06-11")])
+    assert n == 2
+    df = store.get_daily_bars("600206.SH", days=10)
+    assert df is not None
+    assert list(df.columns) == ["open", "high", "low", "close", "volume"]
+    assert df.index.name == "date"
+    assert len(df) == 2
+
+
+def test_upsert_replaces_on_pk_conflict(store: MarketStore) -> None:
+    store.upsert_daily_bars("600206.SH", [_row("2026-06-10", close=1.0)])
+    store.upsert_daily_bars("600206.SH", [_row("2026-06-10", close=99.99)])
+    df = store.get_daily_bars("600206.SH", start="2026-06-10", end="2026-06-10")
+    assert df is not None and df["close"].iloc[0] == 99.99
+
+
+def test_get_daily_returns_none_when_empty(store: MarketStore) -> None:
+    assert store.get_daily_bars("000000.SH", days=5) is None
+
+
+def test_last_daily_date(store: MarketStore) -> None:
+    store.upsert_daily_bars("600206.SH", [_row("2026-06-10"), _row("2026-06-11")])
+    assert store.last_daily_date("600206.SH") == "2026-06-11"
+    assert store.last_daily_date("000000.SH") is None
+
+
+def test_dragon_tiger_get_has(store: MarketStore) -> None:
+    assert store.has_dragon_tiger("2026-06-11") is False
+    store.upsert_dragon_tiger("2026-06-11", [{"code": "600206", "name": "X", "close": 10}])
+    assert store.has_dragon_tiger("2026-06-11") is True
+    rows = store.get_dragon_tiger("2026-06-11")
+    assert len(rows) == 1 and rows[0]["code"] == "600206"
+
+
+def test_pool_replace_semantics(store: MarketStore) -> None:
+    # Second upsert for the same (pool_type, date) must fully replace, not append.
+    store.upsert_pool("limitup", "2026-06-11", [{"code": "600206"}])
+    store.upsert_pool("limitup", "2026-06-11", [{"code": "000001"}, {"code": "300750"}])
+    codes = {p["code"] for p in store.get_pool("limitup", "2026-06-11")}
+    assert codes == {"000001", "300750"}
+
+
+def test_meta_round_trip(store: MarketStore) -> None:
+    assert store.get_meta("k") is None
+    store.set_meta("daemon:2026-06-11", "ts")
+    assert store.get_meta("daemon:2026-06-11") == "ts"
+
+
+def test_table_counts_and_range(store: MarketStore) -> None:
+    store.upsert_daily_bars("600206.SH", [_row("2026-06-10"), _row("2026-06-11")])
+    counts = store.table_counts()
+    assert counts["bars_daily"] == 2
+    lo, hi = store.date_range("bars_daily")
+    assert lo == "2026-06-10" and hi == "2026-06-11"

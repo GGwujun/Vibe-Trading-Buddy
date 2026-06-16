@@ -273,8 +273,8 @@ export function LogicChain() {
                   <Link to="/alpha-forge" className="block rounded-md bg-primary px-3 py-2 text-center text-xs font-medium text-primary-foreground hover:opacity-90">
                     生成 AlphaForge 报告
                   </Link>
-                  <Link to="/position-decision" className="block rounded-md border px-3 py-2 text-center text-xs hover:bg-muted">
-                    加入持仓决策
+                  <Link to="/tracking-dashboard" className="block rounded-md border px-3 py-2 text-center text-xs hover:bg-muted">
+                    加入跟踪看板
                   </Link>
                 </div>
               </section>

@@ -18,6 +18,10 @@ const API_ONLY_PATHS = [
   "/auth",
   "/credits",
   "/notify",
+  "/tpdog",
+  "/data-health",
+  "/market-sync",
+  "/tracking",
   // Fund API uses specific sub-paths (NOT bare "/fund" — that prefix would
   // swallow the /fund-opportunity and /fund-arbitrage SPA pages on refresh).
   "/fund/scan",
@@ -34,7 +38,7 @@ const SPA_WITH_API_PATHS = [
   "/news",
   "/opportunity",
   "/logic-chain",
-  "/position-decision",
+  "/tracking-dashboard",
   "/account"
 ];
 
@@ -68,7 +72,7 @@ export default defineConfig(({ mode }) => {
         ...Object.fromEntries(API_ONLY_PATHS.map((p) => [p, apiProxy])),
         // Single-fund detail API: /fund/{6-digit-code} (dynamic, not a fixed prefix)
         "^/fund/\\d{6}/?$": apiProxy,
-        // /position-decision 是前端页面，不能被 /position 前缀误代理。
+        // /tracking-dashboard 是前端页面，不能被 /position 前缀误代理。
         "^/position/": apiProxy,
         // SPA pages that share a URL with API: HTML fallback on browser refresh
         ...Object.fromEntries(SPA_WITH_API_PATHS.map((p) => [p, apiProxyWithHtmlFallback])),

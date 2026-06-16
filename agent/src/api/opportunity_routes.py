@@ -81,8 +81,8 @@ def _fetch_top_stocks(limit: int = 200) -> list[dict[str, Any]]:
         return stocks
     # Fallback to mootdx
     try:
-        from mootdx.quotes import Quotes
-        client = Quotes.factory(market="std", timeout=15)
+        from src.data.mootdx_helper import get_quotes
+        client = get_quotes(timeout=15)
 
         # Valid A-share individual stock code ranges (excludes indices, ETFs, etc.)
         # SZ main: 000001-004999, ChiNext: 300000-301999

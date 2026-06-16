@@ -30,7 +30,7 @@ SigmX 是一套**面向 A 股为主的多智能体投研平台**，在 [Vibe-Tra
 | 套利机会 | `/fund-opportunity` | 全市场 LOF/ETF 折溢价扫描排行 |
 | 套利分析 | `/fund-arbitrage` | 6-Agent 单基金深度套利报告（消耗积分）|
 | 因子工厂 | `/alpha-zoo` | 452 个 Alpha 因子浏览 / 回测（**仅管理员**）|
-| 持仓决策 | `/position-decision` | 趋势 / 资金 / 事件 / 风险多维度仓位审视 |
+| 跟踪看板 | `/tracking-dashboard` | 趋势 / 资金 / 事件 / 风险多维度仓位审视 |
 | 机会清单 | `/opportunity` | 系统扫描的候选标的 |
 | 逻辑链 | `/logic-chain` | 宏观到交易的分层推理 |
 | 新闻 / 事件 | `/news` `/events` | 市场情报 |

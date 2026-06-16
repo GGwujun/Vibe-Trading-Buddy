@@ -179,6 +179,20 @@ export const api = {
       body: JSON.stringify(settings),
     }),
 
+  // Data-source health (admin) — probe mootdx / akshare / RSSHub / overseas proxy
+  getDataHealth: () => request<DataHealthReport>("/data-health"),
+
+  // TPDog (托普量化) — HTTPS 行情/资金流/龙虎榜源
+  getTpdogStatus: () => request<TpdogStatus>("/tpdog/status"),
+  getTpdogTradingDays: (year: string) =>
+    request<TpdogEnvelope>(`/tpdog/trading-days?year=${encodeURIComponent(year)}`),
+  getTpdogDaily: (code: string, start: string, end: string) =>
+    request<TpdogEnvelope>(`/tpdog/daily?code=${encodeURIComponent(code)}&start=${start}&end=${end}`),
+  getTpdogCallAuction: (code: string, test = false) =>
+    request<TpdogEnvelope>(`/tpdog/call-auction?code=${encodeURIComponent(code)}&test=${test}`),
+  getTpdogDragonTiger: (date: string) =>
+    request<TpdogEnvelope>(`/tpdog/dragon-tiger?date=${date}`),
+
   // Alpha Zoo API
   listAlphas: (params: AlphaListParams = {}) => {
     const q = new URLSearchParams();
@@ -272,6 +286,64 @@ export const api = {
     }),
   removeWatchlistItem: (symbol: string) =>
     request<{ ok: boolean }>(`/position/watchlist/${encodeURIComponent(symbol)}`, {
+      method: "DELETE",
+    }),
+
+  // 自选 & 定时分析 — independent watchlist (separate from position watchlist)
+  getTrackingWatchlist: () =>
+    request<{ items: TrackingWatchlistItem[]; count: number }>("/tracking/watchlist"),
+  addTrackingWatchlistItem: (symbol: string) =>
+    request<{ ok: boolean; item: TrackingWatchlistItem }>(
+      `/tracking/watchlist/${encodeURIComponent(symbol)}`,
+      { method: "POST" },
+    ),
+  deleteTrackingWatchlistItem: (symbol: string) =>
+    request<{ ok: boolean }>(`/tracking/watchlist/${encodeURIComponent(symbol)}`, {
+      method: "DELETE",
+    }),
+
+  // 自选 & 定时分析 — scheduled tasks
+  listTrackingTasks: () =>
+    request<{ items: ScheduledTask[]; count: number }>("/tracking/tasks"),
+  createTrackingTask: (body: {
+    symbol: string;
+    horizon: Horizon;
+    time: string;
+    enabled: boolean;
+  }) =>
+    request<{ ok: boolean; task: ScheduledTask }>("/tracking/tasks", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateTrackingTask: (
+    taskId: string,
+    patch: Partial<Pick<ScheduledTask, "horizon" | "time" | "enabled">>,
+  ) =>
+    request<{ ok: boolean; task: ScheduledTask }>(
+      `/tracking/tasks/${encodeURIComponent(taskId)}`,
+      { method: "PUT", body: JSON.stringify(patch) },
+    ),
+  deleteTrackingTask: (taskId: string) =>
+    request<{ ok: boolean }>(`/tracking/tasks/${encodeURIComponent(taskId)}`, {
+      method: "DELETE",
+    }),
+  deleteTrackingTaskBySymbol: (symbol: string) =>
+    request<{ ok: boolean }>(`/tracking/tasks/by-symbol/${encodeURIComponent(symbol)}`, {
+      method: "DELETE",
+    }),
+  runTrackingTaskNow: (taskId: string) =>
+    request<{ ok: boolean; run: AnalysisRun }>(
+      `/tracking/tasks/${encodeURIComponent(taskId)}/run`,
+      { method: "POST" },
+    ),
+
+  // 自选 & 定时分析 — history
+  getTrackingHistory: (symbol: string) =>
+    request<{ symbol: string; items: AnalysisRun[]; count: number }>(
+      `/tracking/history/${encodeURIComponent(symbol)}`,
+    ),
+  clearTrackingHistory: (symbol: string) =>
+    request<{ ok: boolean }>(`/tracking/history/${encodeURIComponent(symbol)}`, {
       method: "DELETE",
     }),
 
@@ -388,15 +460,44 @@ export interface UpdateLLMSettingsRequest {
 export interface DataSourceSettings {
   tushare_token_configured: boolean;
   tushare_token_hint?: string | null;
+  tpdog_token_configured: boolean;
+  tpdog_token_hint?: string | null;
   baostock_supported: boolean;
   baostock_installed: boolean;
   baostock_message: string;
   env_path: string;
 }
 
+export interface SourceHealth {
+  name: string;
+  ok: boolean;
+  latency_ms: number;
+  detail: string;
+}
+
+export interface DataHealthReport {
+  sources: SourceHealth[];
+  summary_ok: number;
+  summary_total: number;
+}
+
+export interface TpdogStatus {
+  configured: boolean;
+  ok: boolean;
+  detail: string;
+}
+
+export interface TpdogEnvelope {
+  ok: boolean;
+  detail: string;
+  content: Record<string, unknown>[];
+}
+
 export interface UpdateDataSourceSettingsRequest {
   tushare_token?: string;
   clear_tushare_token?: boolean;
+  tpdog_token?: string;
+  clear_tpdog_token?: boolean;
 }
 
 // --- Types matching backend API contracts ---
@@ -1119,6 +1220,13 @@ export interface PositionSignal {
   name: string;
   price: number;
   change_pct: number;
+  market_basics?: {
+    open: number;       // 今开
+    prev_close: number; // 昨收
+    high: number;       // 日高
+    low: number;        // 日低
+    volume: number;     // 成交量（手）
+  };
   error?: string;
   // Legacy flat fields (backward compat)
   trend: TrendInfo;
@@ -1135,6 +1243,55 @@ export interface PositionSignal {
   take_profit?: number | null;
   risk_reward?: number | null;
   api_version?: number;
+}
+
+// --- 自选 & 定时分析 (scheduled analysis) types ---
+
+export interface TrackingWatchlistItem {
+  symbol: string;
+  name: string;
+  added_at: string;
+}
+
+export type Horizon = "短线" | "中线" | "长线";
+
+export interface ScheduledTask {
+  task_id: string;
+  symbol: string;
+  name: string;
+  horizon: Horizon;
+  time: string; // "HH:MM" Beijing
+  enabled: boolean;
+  created_at: string;
+  last_run_at: string | null;
+  last_status: "ok" | "error" | null;
+}
+
+export interface TrimmedAnalysis {
+  symbol: string;
+  name: string;
+  price: number;
+  change_pct: number;
+  overall_score: number;
+  decision: string;
+  decision_label: string;
+  confidence: string;
+  stop_loss: number | null;
+  take_profit: number | null;
+  risk_reward: number | null;
+  dimensions: AnalysisDimension[];
+}
+
+export interface AnalysisRun {
+  run_id: string;
+  task_id: string;
+  symbol: string;
+  name: string;
+  horizon: Horizon;
+  run_at: string;
+  status: "ok" | "error";
+  error: string | null;
+  result: TrimmedAnalysis | null;
 }
 
 export interface IndexInfo {

@@ -164,6 +164,31 @@ class TestResolveLoader:
             with pytest.raises(NoAvailableSourceError):
                 resolve_loader("martian_stocks")
 
+    def test_auto_appends_registered_source_not_in_chain(self) -> None:
+        """A registered loader serving the market but absent from the chain
+        is auto-tried as a last-resort fallback."""
+        with patch.dict(LOADER_REGISTRY, {
+            "fake_unavailable": _FakeUnavailableLoader,
+            "fake_available": _FakeAvailableLoader,
+        }, clear=True):
+            with patch.dict(FALLBACK_CHAINS, {
+                "a_share": ["fake_unavailable"],  # only the dead one configured
+            }):
+                loader = resolve_loader("a_share")
+                assert loader.name == "fake_available"  # auto-appended
+
+    def test_auto_fallback_skips_wrong_market(self) -> None:
+        """Auto-fallback never picks a loader that doesn't serve the market."""
+        with patch.dict(LOADER_REGISTRY, {
+            "fake_unavailable": _FakeUnavailableLoader,   # a_share, dead
+            "fake_crypto": _FakeCryptoLoader,             # crypto, alive but wrong market
+        }, clear=True):
+            with patch.dict(FALLBACK_CHAINS, {
+                "a_share": ["fake_unavailable"],
+            }):
+                with pytest.raises(NoAvailableSourceError):
+                    resolve_loader("a_share")
+
 
 # ---------------------------------------------------------------------------
 # get_loader_cls_with_fallback

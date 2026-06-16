@@ -52,6 +52,7 @@ def _ensure_registered() -> None:
         "backtest.loaders.yfinance_loader",
         "backtest.loaders.akshare_loader",
         "backtest.loaders.mootdx_loader",
+        "backtest.loaders.tpdog_loader",
         "backtest.loaders.ccxt_loader",
         "backtest.loaders.futu",
     ]
@@ -68,7 +69,7 @@ def _ensure_registered() -> None:
 # ---------------------------------------------------------------------------
 
 FALLBACK_CHAINS: dict[str, list[str]] = {
-    "a_share":   ["tushare", "mootdx", "akshare"],
+    "a_share":   ["tushare", "mootdx", "tpdog", "akshare"],
     "us_equity": ["yfinance", "akshare"],
     "hk_equity": ["yfinance", "futu", "akshare"],
     "crypto":    ["okx", "ccxt", "yfinance"],
@@ -83,7 +84,11 @@ def resolve_loader(market: str) -> Any:
     """Return the first *available* loader instance for *market*.
 
     Walks the fallback chain and returns the first loader whose
-    ``is_available()`` returns ``True``.
+    ``is_available()`` returns ``True``. After the configured chain is
+    exhausted, any other *registered* loader that serves ``market`` (and was
+    not already in the chain) is tried as an automatic last-resort fallback —
+    so adding a new data source requires no edits to FALLBACK_CHAINS to be
+    picked up. (Adapted from TradingAgents-AShare's ``_resolve_vendor_chain``.)
 
     Args:
         market: Market type key (e.g. ``"a_share"``, ``"crypto"``).
@@ -95,11 +100,10 @@ def resolve_loader(market: str) -> Any:
         NoAvailableSourceError: If every candidate is unavailable.
     """
     _ensure_registered()
-    chain = FALLBACK_CHAINS.get(market, [])
+    chain = list(FALLBACK_CHAINS.get(market, []))
     tried: list[str] = []
-    for name in chain:
-        if name not in LOADER_REGISTRY:
-            continue
+
+    def _try(name: str) -> Any | None:
         tried.append(name)
         # Issue #50 — some loaders (e.g. Tushare) call into the SDK during
         # __init__ and raise on missing credentials. Treat that the same as
@@ -108,9 +112,33 @@ def resolve_loader(market: str) -> Any:
             loader = LOADER_REGISTRY[name]()
         except Exception as exc:
             logger.debug("loader %s failed to construct: %s", name, exc)
-            continue
+            return None
         if loader.is_available():
             return loader
+        return None
+
+    # 1. Configured chain.
+    for name in chain:
+        if name not in LOADER_REGISTRY:
+            continue
+        loader = _try(name)
+        if loader is not None:
+            return loader
+
+    # 2. Auto-append: every other registered loader that serves this market
+    #    but wasn't in the configured chain — last-resort fallback so new
+    #    sources are discoverable without editing FALLBACK_CHAINS.
+    for name, cls in LOADER_REGISTRY.items():
+        if name in chain or market not in getattr(cls, "markets", set()):
+            continue
+        loader = _try(name)
+        if loader is not None:
+            logger.info(
+                "resolve_loader('%s'): auto-fell back to registered source '%s' "
+                "(not in configured chain)", market, name,
+            )
+            return loader
+
     raise NoAvailableSourceError(
         f"No available data source for market '{market}'. "
         f"Tried: {tried or chain}. Check network and API token config."

@@ -97,18 +97,45 @@ def _save_report(report_id: str, content_md: str, meta: dict[str, Any]) -> Path:
 
 
 def _extract_meta_from_md(content: str) -> dict[str, str]:
-    """Extract premium rate / rating from the report header."""
+    """Extract premium rate / rating from the report header.
+
+    Prefers the machine-readable ``<!-- DECISION: {json} -->`` block emitted by
+    the report_writer agent; falls back to header regex scraping.
+    """
     meta: dict[str, str] = {}
+    # Machine-readable block first.
+    block = _parse_fund_decision_block(content)
+    if block:
+        if block.get("rating"):
+            meta["rating"] = block["rating"]
+        if block.get("action"):
+            meta["action"] = block["action"]
+        if block.get("premium_pct") not in (None, 0, "0", ""):
+            meta["premium_rate"] = f"{block['premium_pct']}%"
+        if block.get("net_return_pct") not in (None, 0, "0", ""):
+            meta["net_return"] = f"{block['net_return_pct']}%"
+
     for line in content.split("\n")[:20]:
         if "**折溢价率**" in line:
             m = re.search(r"\*\*(±?\s*-?[\d.]+%)\*\*", line)
             if m:
-                meta["premium_rate"] = m.group(1)
+                meta.setdefault("premium_rate", m.group(1))
         elif "**套利评级**" in line:
             m = re.search(r"\*\*(.+?)\*\*\s*$", line)
             if m:
-                meta["rating"] = m.group(1).strip()
+                meta.setdefault("rating", m.group(1).strip())
     return meta
+
+
+def _parse_fund_decision_block(content: str) -> dict | None:
+    """Parse the ``<!-- DECISION: {json} -->`` block from a fund report."""
+    matches = list(re.finditer(r"<!--\s*DECISION\s*:\s*(\{.*?\})\s*-->", content, re.S))
+    if not matches:
+        return None
+    try:
+        return json.loads(matches[-1].group(1))
+    except (ValueError, json.JSONDecodeError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +331,15 @@ def register_fund_arbitrage_routes(
                     "run_id": run_id,
                 }
                 meta.update(_extract_meta_from_md(content))
+                # Validate the arbitrage decision (premium/net-return consistency).
+                try:
+                    from src.analysis.decision_validator import validate_fund_decision
+                    warnings = validate_fund_decision(meta)
+                    if warnings:
+                        meta["decision_warnings"] = warnings
+                        logger.warning("Fund %s decision warnings: %s", body.fund_code, warnings)
+                except Exception:  # noqa: BLE001
+                    logger.debug("fund decision validation skipped", exc_info=True)
                 _save_report(report_id, content, meta)
                 logger.info("Saved fund report %s for %s", report_id, body.fund_code)
             except Exception as e:

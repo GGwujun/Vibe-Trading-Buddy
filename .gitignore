@@ -90,3 +90,7 @@ AGENTS.md
 # Alpha Zoo wiki artifacts (generated, not source)
 wiki/alpha-library/manifest.json
 wiki/alpha-library/content/
+
+# Runtime logs / temp outputs
+frontend/vite-sigmx.log
+scripts/_news_out.txt

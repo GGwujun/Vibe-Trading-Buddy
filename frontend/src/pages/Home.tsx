@@ -43,7 +43,7 @@ const QUICK_ACTIONS = [
     desc: "用多 Agent 流水线完成单标的深度分析。",
   },
   {
-    to: "/position-decision",
+    to: "/tracking-dashboard",
     icon: Target,
     title: "检查持仓动作",
     desc: "从趋势、资金、事件和风险维度审视仓位。",

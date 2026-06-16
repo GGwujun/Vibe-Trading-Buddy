@@ -686,6 +686,23 @@ def _analyze_symbol(code: str, df: pd.DataFrame) -> dict[str, Any]:
 
     name = _get_stock_name(code)
 
+    # ---- Market basics (latest bar: 今开/昨收/日高/日低/成交量) ----
+    try:
+        open_today = round(float(df["open"].astype(float).iloc[-1]), 2)
+        day_high = round(float(df["high"].astype(float).iloc[-1]), 2)
+        day_low = round(float(df["low"].astype(float).iloc[-1]), 2)
+        day_volume = int(float(df["volume"].astype(float).iloc[-1]))
+    except Exception:
+        open_today = day_high = day_low = 0
+        day_volume = 0
+    market_basics = {
+        "open": open_today,            # 今开
+        "prev_close": prev_price,      # 昨收
+        "high": day_high,              # 日高
+        "low": day_low,                # 日低
+        "volume": day_volume,          # 成交量（手）
+    }
+
     # ---- 1. Macro (no I/O -- uses cached index data) ----
     macro = _safe_dimension("macro", _layer_macro)
 
@@ -796,6 +813,7 @@ def _analyze_symbol(code: str, df: pd.DataFrame) -> dict[str, Any]:
         "name": name,
         "price": cur_price,
         "change_pct": change_pct,
+        "market_basics": market_basics,
         # Legacy
         "trend": {"direction": trend_legacy["direction"], "ma_pattern": trend_legacy["ma_pattern"], "score": trend_legacy["score"]},
         "technical": {"patterns": patterns_legacy["patterns"], "score": patterns_legacy["score"]},
@@ -940,8 +958,8 @@ def _analyze_events_stock(code: str, name: str) -> dict[str, Any]:
     # 1. Get industry info for event matching
     industry_names: list[str] = []
     try:
-        from mootdx.quotes import Quotes
-        client = Quotes.factory(market="std", timeout=8)
+        from src.data.mootdx_helper import get_quotes
+        client = get_quotes(timeout=8)
         raw_code = code.replace(".SZ", "").replace(".SH", "")
         # F10 category 5 = industry info
         ind_data = client.F10C(raw_code, 5)
@@ -1114,8 +1132,8 @@ def _load_stock_names_batch() -> None:
 
     # 2. mootdx (通达信协议 — no rate limits, no token needed)
     try:
-        from mootdx.quotes import Quotes
-        client = Quotes.factory(market="std", timeout=15)
+        from src.data.mootdx_helper import get_quotes
+        client = get_quotes(timeout=15)
         for market_id, suffix in [(0, ".SZ"), (1, ".SH")]:
             try:
                 df = client.stocks(market=market_id)
@@ -1335,8 +1353,8 @@ def register_position_routes(
         Returns 'SZ', 'SH', or '' (unknown).
         """
         try:
-            from mootdx.queries import Quotes
-            client = Quotes.factory(market="std", timeout=5)
+            from src.data.mootdx_helper import get_quotes
+            client = get_quotes(timeout=5)
             for market_id, suffix in [(0, "SZ"), (1, "SH")]:
                 try:
                     df = client.stocks(market=market_id)

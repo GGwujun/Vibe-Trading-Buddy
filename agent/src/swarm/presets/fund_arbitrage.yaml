@@ -398,6 +398,12 @@ agents:
 
       ## ═══ 输出 ═══
       将完整报告写入 `report.md`。这是交付给用户的最终产物。
+
+      ## 机读结论块（必须，放在 report.md 最末）
+      action=溢价套利/折价套利/观望（对应 申购→卖 / 买→赎回 / 不操作）；rating=推荐/谨慎/规避；
+      premium_pct=当前折溢价率(%)；net_return_pct=扣除成本后预估净收益(%)；capital_wan=建议资金量(万元)。
+      数值为 0 表示不适用。格式严格单行：
+      <!-- DECISION: {"action":"溢价套利","rating":"推荐","premium_pct":2.3,"net_return_pct":0.8,"capital_wan":50} -->
     tools: [read_file, write_file, load_skill]
     skills: []
     max_iterations: 50
