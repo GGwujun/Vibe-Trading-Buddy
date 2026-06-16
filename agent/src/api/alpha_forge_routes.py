@@ -117,8 +117,17 @@ def _sanitize_filename(name: str) -> str:
 
 
 def _extract_metadata_from_md(content: str) -> dict[str, str]:
-    """Extract metadata from AlphaForge markdown report frontmatter."""
+    """Extract metadata from AlphaForge markdown report.
+
+    Prefers machine-readable blocks (``<!-- DECISION: {json} -->`` from the
+    trader, ``<!-- VERDICT: {json} -->`` from the PM) for the structured
+    fields (signal/rating/prices); falls back to frontmatter regex scraping so
+    older reports without blocks still work.
+    """
     meta: dict[str, str] = {}
+    decision = _parse_decision_block(content, "DECISION")
+    verdict = _parse_decision_block(content, "VERDICT")
+
     lines = content.split("\n")
     for line in lines[:20]:
         line = line.strip()
@@ -133,15 +142,47 @@ def _extract_metadata_from_md(content: str) -> dict[str, str]:
             if m: meta["created_at"] = m.group(1)
         elif "**交易信号**" in line:
             m = re.search(r"\*\*(卖出|买入|持有|BUY|SELL|HOLD)\*\*", line)
-            if m: meta["signal"] = m.group(1)
+            if m: meta.setdefault("signal", m.group(1))
         elif "FINAL TRANSACTION PROPOSAL" in line:
-            # Last one wins
             m = re.search(r"\*\*(SELL|BUY|HOLD)\*\*", line)
-            if m: meta["signal"] = m.group(1)
+            if m: meta.setdefault("signal", m.group(1))
         elif "**投资评级" in line or "最终投资评级" in line:
             m = re.search(r"[：:]\s*\**(\S+)\**", line)
-            if m: meta["rating"] = m.group(1).strip("*")
+            if m: meta.setdefault("rating", m.group(1).strip("*"))
+
+    # Machine-readable blocks override the regex scraping when present.
+    # VERDICT (PM, final) wins over DECISION (trader) for action/rating.
+    src = {**(decision or {}), **(verdict or {})}
+    if src:
+        action = src.get("action", "").upper()
+        action_cn = {"BUY": "买入", "SELL": "卖出", "HOLD": "持有"}.get(action, action)
+        if action_cn:
+            meta["signal"] = action_cn
+        rating = src.get("rating")
+        if rating:
+            meta["rating"] = rating
+        for field, key in (("entry", "entry"), ("target", "target"), ("stop", "stop_loss"), ("size_pct", "size_pct")):
+            val = src.get(field)
+            if val not in (None, 0, "0", ""):
+                meta[key] = str(val)
     return meta
+
+
+def _parse_decision_block(content: str, tag: str) -> dict | None:
+    """Parse a ``<!-- {tag}: {json} -->`` machine-readable block.
+
+    Returns the parsed JSON dict, or None if absent/malformed. The block is
+    emitted by the trader (DECISION) and PM (VERDICT) agents so downstream code
+    can rely on structured fields instead of scraping free-text markdown.
+    """
+    # Take the last occurrence (most final).
+    matches = list(re.finditer(rf"<!--\s*{tag}\s*:\s*(\{{.*?\}})\s*-->", content, re.S))
+    if not matches:
+        return None
+    try:
+        return json.loads(matches[-1].group(1))
+    except (ValueError, json.JSONDecodeError):
+        return None
 
 
 def _list_report_dirs() -> list[Path]:
@@ -199,6 +240,8 @@ _AGENT_SECTIONS: list[tuple[str, str, str]] = [
     # Layer 3 — debate
     ("bull_case", "多方论证", "第三部分：多空辩论"),
     ("bear_case", "空方论证", "第三部分：多空辩论"),
+    ("bull_rebuttal", "多方反驳（第二轮）", "第三部分：多空辩论"),
+    ("bear_rebuttal", "空方反驳（第二轮）", "第三部分：多空辩论"),
     ("neutral_synthesis", "中性综合", "第三部分：多空辩论"),
     # Layer 4-6 — decision chain
     ("trader", "交易决策", "第四部分：交易决策"),
@@ -549,6 +592,19 @@ def register_alpha_forge_routes(
                 # Extract signal and rating from the PM section
                 extra = _extract_metadata_from_md(content)
                 meta.update(extra)
+
+                # Validate the LLM decision against hard A-share rules (stop
+                # ordering, position bounds, daily-limit sanity). Warnings are
+                # surfaced in metadata; nothing is auto-corrected.
+                try:
+                    from src.analysis.decision_validator import fetch_latest_price, validate_stock_decision
+                    price = fetch_latest_price(body.target)
+                    decision_warnings = validate_stock_decision(meta, latest_price=price)
+                    if decision_warnings:
+                        meta["decision_warnings"] = decision_warnings
+                        logger.warning("AlphaForge %s decision warnings: %s", body.target, decision_warnings)
+                except Exception as exc:  # noqa: BLE001 — validation must never block save
+                    logger.debug("decision validation skipped: %s", exc)
 
                 _save_report(report_id, content, meta)
                 logger.info("Saved AlphaForge report %s for %s", report_id, body.target)
