@@ -106,6 +106,13 @@ export const api = {
   changePassword: (old_password: string, new_password: string) =>
     request<{ status: string }>("/account/password", { method: "POST", body: JSON.stringify({ old_password, new_password }) }),
 
+  // Admin redeem codes
+  listRedeemCodes: (status = "all", limit = 100) =>
+    request<RedeemCodesListResponse>(`/admin/redeem-codes?status=${status}&limit=${limit}`),
+  generateRedeemCodes: (body: GenerateCodesRequest) =>
+    request<GenerateCodesResponse>("/admin/redeem-codes/generate", { method: "POST", body: JSON.stringify(body) }),
+  getRedeemCodesStats: () => request<RedeemCodesStats>("/admin/redeem-codes/stats"),
+
   // Notify (Feishu/DingTalk/WeChat)
   getNotifyConfig: () => request<NotifyConfig>("/notify/config"),
   saveNotifyConfig: (cfg: NotifyConfig) => request<NotifyConfig>("/notify/config", { method: "PUT", body: JSON.stringify(cfg) }),
@@ -1417,6 +1424,23 @@ export interface DailyRecommendationItem {
   risk_note: string;
   created_at: string;
   source: string;
+  recommendation_method?: string;
+  ai_review?: {
+    score?: number;
+    decision?: string;
+    summary?: string;
+    risk?: string;
+    factor_note?: string;
+    status?: string;
+  };
+  factor_review?: {
+    score?: number;
+    status?: string;
+    summary?: string;
+    peer_count?: number;
+    top_bullish?: Array<{ label?: string; theme?: string; rank_pct?: number; direction?: string }>;
+    top_bearish?: Array<{ label?: string; theme?: string; rank_pct?: number; direction?: string }>;
+  };
   performance: RecommendationPerformance;
 }
 
@@ -1661,4 +1685,47 @@ export interface FundRunDetail {
   completed_at: string | null;
   final_report: string | null;
   tasks: { id: string; agent_id: string; status: string }[];
+}
+
+// --- Admin redeem codes types ---
+
+export interface RedeemCodeItem {
+  code: string;
+  credits: number;
+  status: "unused" | "used" | "expired";
+  redeemed_by: string | null;
+  redeemed_at: string | null;
+  created_at: string;
+  expires_at: string | null;
+}
+
+export interface RedeemCodesListResponse {
+  items: RedeemCodeItem[];
+  total: number;
+  unused: number;
+  used: number;
+  expired: number;
+}
+
+export interface GenerateCodesRequest {
+  credits: number;
+  count: number;
+  prefix: string;
+  days: number;
+}
+
+export interface GenerateCodesResponse {
+  codes: RedeemCodeItem[];
+  count: number;
+  credits: number;
+  expires_at: string | null;
+}
+
+export interface RedeemCodesStats {
+  total: number;
+  unused: number;
+  used: number;
+  expired: number;
+  total_credits_unused: number;
+  total_credits_used: number;
 }

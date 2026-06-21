@@ -3202,6 +3202,14 @@ register_credits_routes(app)
 
 
 # ============================================================================
+# Admin redeem code routes — defined in src/api/admin_redeem_routes.py
+# ============================================================================
+
+from src.api.admin_redeem_routes import register_admin_redeem_routes  # noqa: E402
+register_admin_redeem_routes(app)
+
+
+# ============================================================================
 # Notify routes (Feishu/DingTalk/WeChat) — defined in src/api/notify_routes.py
 # ============================================================================
 

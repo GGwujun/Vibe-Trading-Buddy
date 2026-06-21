@@ -64,6 +64,9 @@ const RegisterPage = lazy(() =>
 const Account = lazy(() =>
   import("@/pages/Account").then((m) => ({ default: m.Account })),
 );
+const RedeemCodes = lazy(() =>
+  import("@/pages/RedeemCodes").then((m) => ({ default: m.RedeemCodes })),
+);
 
 function PageLoader() {
   return (
@@ -157,6 +160,7 @@ export const router = createBrowserRouter([
               { path: "/alpha-zoo/bench", element: wrap(AlphaZoo) },
               { path: "/alpha-zoo/compare", element: wrap(AlphaZoo) },
               { path: "/alpha-zoo/:alphaId", element: wrap(AlphaZoo) },
+              { path: "/redeem-codes", element: wrap(RedeemCodes) },
             ],
           },
         ],

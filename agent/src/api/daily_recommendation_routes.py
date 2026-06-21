@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -231,10 +232,201 @@ def _candidate_pool(slot: str) -> list[dict[str, Any]]:
     return unique
 
 
+def _extract_json_object(text: str) -> dict[str, Any]:
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("empty AI response")
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", text, re.S)
+    if not match:
+        raise ValueError("AI response did not contain JSON")
+    data = json.loads(match.group(0))
+    if not isinstance(data, dict):
+        raise ValueError("AI response JSON is not an object")
+    return data
+
+
+def _factor_review(item: dict[str, Any]) -> dict[str, Any]:
+    symbol = str(item.get("symbol", "")).upper()
+    review: dict[str, Any] = {
+        "score": 0.5,
+        "status": "unavailable",
+        "summary": "Alpha因子不可用",
+        "top_bullish": [],
+        "top_bearish": [],
+        "peer_count": 0,
+    }
+    if not symbol:
+        return review
+    try:
+        from src.data.alpha_signals import compute_alpha_signals
+
+        raw = compute_alpha_signals(symbol)
+        top_bullish = [
+            {
+                "label": s.get("label", ""),
+                "theme": s.get("theme", ""),
+                "rank_pct": s.get("rank_pct", 0.5),
+                "direction": s.get("direction", "neutral"),
+            }
+            for s in raw.get("top_bullish", [])[:3]
+        ]
+        top_bearish = [
+            {
+                "label": s.get("label", ""),
+                "theme": s.get("theme", ""),
+                "rank_pct": s.get("rank_pct", 0.5),
+                "direction": s.get("direction", "neutral"),
+            }
+            for s in raw.get("top_bearish", [])[:3]
+        ]
+        score = float(raw.get("score", 0.5) or 0.5)
+        if raw.get("error"):
+            summary = str(raw["error"])
+            status = "limited"
+        elif score >= 0.60:
+            summary = "Alpha因子偏多"
+            status = "ok"
+        elif score <= 0.40:
+            summary = "Alpha因子偏空"
+            status = "ok"
+        else:
+            summary = "Alpha因子中性"
+            status = "ok"
+        return {
+            "score": round(max(0.01, min(0.99, score)), 3),
+            "status": status,
+            "summary": summary,
+            "top_bullish": top_bullish,
+            "top_bearish": top_bearish,
+            "peer_count": int(raw.get("peer_count", 0) or 0),
+        }
+    except Exception as exc:
+        logger.info("factor review failed for %s: %s", symbol, exc)
+        return review
+
+
+def _ai_review_candidates(candidates: list[dict[str, Any]], slot: str, limit: int) -> dict[str, dict[str, Any]]:
+    if not candidates:
+        return {}
+    payload = []
+    for item in candidates:
+        factor = item.get("factor_review", {})
+        payload.append({
+            "symbol": item.get("symbol"),
+            "name": item.get("name"),
+            "price": item.get("price"),
+            "change_pct": item.get("change_pct"),
+            "slot": slot,
+            "category": item.get("category_label") or item.get("category_id"),
+            "scanner_reason": item.get("reason"),
+            "scanner_score": item.get("score"),
+            "factor_score": factor.get("score"),
+            "factor_summary": factor.get("summary"),
+            "top_bullish_factors": [s.get("label") for s in factor.get("top_bullish", [])],
+            "top_bearish_factors": [s.get("label") for s in factor.get("top_bearish", [])],
+        })
+
+    prompt = (
+        "你是A股每日推荐复核员。必须结合候选池信号、Alpha因子和风险，筛选适合今日推荐的股票。\n"
+        "要求：\n"
+        "1. 不要编造新股票，只能评价输入候选。\n"
+        "2. ai_score 取 0-1，越高越值得进入今日推荐。\n"
+        "3. decision 只能是 recommend/watch/reject。\n"
+        "4. summary 用一句中文说明为什么推荐或观察。\n"
+        "5. risk 用一句中文写主要失效条件。\n"
+        f"6. 最多 recommend {limit} 只。\n\n"
+        f"候选JSON：\n{json.dumps(payload, ensure_ascii=False)}\n\n"
+        "只输出JSON，格式："
+        '{"reviews":[{"symbol":"300000.SZ","ai_score":0.72,"decision":"recommend","summary":"...","risk":"...","factor_note":"..."}]}'
+    )
+    try:
+        from src.providers.chat import ChatLLM
+
+        llm = ChatLLM()
+        resp = llm.chat([
+            {"role": "system", "content": "你只输出可解析JSON，不输出Markdown。"},
+            {"role": "user", "content": prompt},
+        ], timeout=25)
+        data = _extract_json_object(resp.content or "")
+    except Exception as exc:
+        logger.warning("AI recommendation review failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"AI推荐复核不可用: {exc}")
+
+    reviews: dict[str, dict[str, Any]] = {}
+    for raw in data.get("reviews", []):
+        if not isinstance(raw, dict):
+            continue
+        symbol = str(raw.get("symbol", "")).upper()
+        if not symbol:
+            continue
+        decision = str(raw.get("decision", "watch")).lower()
+        if decision not in {"recommend", "watch", "reject"}:
+            decision = "watch"
+        try:
+            ai_score = float(raw.get("ai_score", 0.5))
+        except (TypeError, ValueError):
+            ai_score = 0.5
+        reviews[symbol] = {
+            "score": round(max(0.01, min(0.99, ai_score)), 3),
+            "decision": decision,
+            "summary": str(raw.get("summary", "")).strip(),
+            "risk": str(raw.get("risk", "")).strip(),
+            "factor_note": str(raw.get("factor_note", "")).strip(),
+            "status": "ok",
+        }
+    return reviews
+
+
+def _reviewed_candidates(slot: str, limit: int) -> list[dict[str, Any]]:
+    candidates = _candidate_pool(slot)
+    if not candidates:
+        return []
+
+    shortlist = candidates[: max(limit * 3, 8)]
+    for item in shortlist:
+        factor = _factor_review(item)
+        item["factor_review"] = factor
+        base = float(item.get("score", item.get("confidence", 0.5)) or 0.5)
+        factor_score = float(factor.get("score", 0.5) or 0.5)
+        item["pre_ai_score"] = round(max(0.01, min(0.99, base * 0.70 + factor_score * 0.30)), 3)
+
+    ai_reviews = _ai_review_candidates(shortlist, slot, limit)
+    reviewed: list[dict[str, Any]] = []
+    for item in shortlist:
+        symbol = str(item.get("symbol", "")).upper()
+        ai = ai_reviews.get(symbol)
+        if not ai:
+            continue
+        item["ai_review"] = ai
+        item["score"] = round(
+            max(0.01, min(0.99, float(item.get("pre_ai_score", 0.5)) * 0.45 + float(ai.get("score", 0.5)) * 0.55)),
+            3,
+        )
+        if ai.get("decision") == "recommend":
+            reviewed.append(item)
+
+    if not reviewed:
+        raise HTTPException(status_code=503, detail="AI复核后没有可推荐标的")
+    reviewed.sort(key=lambda x: x.get("score", 0), reverse=True)
+    return reviewed
+
+
 def _make_record(item: dict[str, Any], slot: str, rank: int) -> dict[str, Any]:
     now = _now_cst()
     symbol = str(item["symbol"]).upper()
     date = now.strftime("%Y-%m-%d")
+    ai_review = item.get("ai_review") or {}
+    factor_review = item.get("factor_review") or {}
+    ai_summary = str(ai_review.get("summary") or "").strip()
+    ai_risk = str(ai_review.get("risk") or "").strip()
+    factor_note = str(ai_review.get("factor_note") or factor_review.get("summary") or "").strip()
+    reason_parts = [part for part in [ai_summary, factor_note, item.get("reason", "")] if part]
     return {
         "id": _record_key(date, slot, symbol),
         "date": date,
@@ -248,10 +440,13 @@ def _make_record(item: dict[str, Any], slot: str, rank: int) -> dict[str, Any]:
         "score": float(item.get("score", item.get("confidence", 0)) or 0),
         "strategy": _strategy_label(str(item.get("category_id", ""))),
         "category": item.get("category_id", ""),
-        "reason": item.get("reason", ""),
-        "risk_note": _risk_note(item),
+        "reason": "；".join(reason_parts[:3]) or item.get("reason", ""),
+        "risk_note": ai_risk or _risk_note(item),
+        "ai_review": ai_review,
+        "factor_review": factor_review,
+        "recommendation_method": "ai_factor_review",
         "created_at": now.isoformat(),
-        "source": "opportunity_scanner",
+        "source": "ai_factor_reviewer",
     }
 
 
@@ -347,7 +542,7 @@ def _has_slot_record(records: list[dict[str, Any]], date: str, slot: str) -> boo
 def _generate_for_slot(slot: str, limit: int) -> list[dict[str, Any]]:
     slot = _normalize_slot(slot)
     date = _today_cst()
-    candidates = _candidate_pool(slot)
+    candidates = _reviewed_candidates(slot, limit)
     if not candidates:
         return []
 

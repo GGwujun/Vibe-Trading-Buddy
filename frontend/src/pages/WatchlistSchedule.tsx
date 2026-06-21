@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   CalendarClock,
@@ -554,6 +555,7 @@ function HistoryDrawer({
 // ---------------------------------------------------------------------------
 
 export function WatchlistSchedule() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [watchlist, setWatchlist] = useState<TrackingWatchlistItem[]>([]);
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
   const [loading, setLoading] = useState(true);
@@ -601,6 +603,46 @@ export function WatchlistSchedule() {
       return next;
     });
   };
+
+  useEffect(() => {
+    if (loading) return;
+    const symbol = normalizeCode(searchParams.get("symbol") ?? "");
+    if (!symbol) return;
+    const existing = watchlist.find((item) => item.symbol === symbol);
+    if (existing) {
+      startCreate(existing);
+      const next = new URLSearchParams(searchParams);
+      next.delete("symbol");
+      setSearchParams(next, { replace: true });
+      return;
+    }
+
+    let cancelled = false;
+    api.addTrackingWatchlistItem(symbol)
+      .then((res) => {
+        if (cancelled) return;
+      toast.success(`已加入观察：${res.item.name || symbol}`);
+        setWatchlist((prev) => {
+          const next = prev.filter((i) => i.symbol !== res.item.symbol);
+          next.push(res.item);
+          return next;
+        });
+        startCreate(res.item);
+      })
+      .catch((e) => {
+        if (!cancelled && !isAuthRequiredError(e)) toast.error(`添加失败：${unknownError(e)}`);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        const next = new URLSearchParams(searchParams);
+        next.delete("symbol");
+        setSearchParams(next, { replace: true });
+      });
+    return () => {
+      cancelled = true;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, searchParams, setSearchParams, watchlist]);
 
   const removeWatchlist = async (symbol: string) => {
     try {
@@ -727,10 +769,10 @@ export function WatchlistSchedule() {
       <div className="shrink-0 border-b px-4 py-3 md:px-6">
         <div className="flex items-center gap-2">
           <CalendarClock className="h-5 w-5 text-primary" />
-          <h1 className="text-xl font-semibold tracking-tight">自选 & 定时分析</h1>
+          <h1 className="text-xl font-semibold tracking-tight">自选观察 & 定时分析</h1>
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
-          为自选标的配置每日定时分析任务，到点（北京时间）自动跑规则引擎并保存结果，可回看历史。
+          这里是你的意向股票池。为关注但未必持仓的标的配置定时分析，到点自动保存结果，可回看历史。
         </p>
       </div>
 

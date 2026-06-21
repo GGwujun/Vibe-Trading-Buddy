@@ -72,7 +72,8 @@ async def fetch(
     else:
         text, title = _fetch_raw(url)
 
-    if len(text) > _MAX_LENGTH:
+    # Do NOT truncate JSON responses - they must remain parseable
+    if strategy != "json" and len(text) > _MAX_LENGTH:
         text = text[:_MAX_LENGTH] + f"\n\n... (truncated, total {len(text)} chars)"
 
     return JSONResponse({"status": "ok", "url": url, "title": title, "content": text, "length": len(text), "strategy": strategy})
@@ -103,7 +104,8 @@ async def fetch_post(
     else:
         text, title = _fetch_raw(url)
 
-    if len(text) > _MAX_LENGTH:
+    # Do NOT truncate JSON responses - they must remain parseable
+    if strategy != "json" and len(text) > _MAX_LENGTH:
         text = text[:_MAX_LENGTH] + f"\n\n... (truncated, total {len(text)} chars)"
 
     return JSONResponse({"status": "ok", "url": url, "title": title, "content": text, "length": len(text), "strategy": strategy})

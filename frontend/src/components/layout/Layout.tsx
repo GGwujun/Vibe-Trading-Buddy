@@ -1,6 +1,6 @@
 ﻿import { useEffect, useState } from "react";
 import { Link, Outlet, useLocation, useSearchParams } from "react-router-dom";
-import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Settings, Layers, Loader2, Target, Zap, Coins, User, CalendarClock } from "lucide-react";
+import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Settings, Layers, Loader2, Target, Zap, Coins, User, CalendarClock, Ticket } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDarkMode } from "@/hooks/useDarkMode";
 import { api, type SessionItem } from "@/lib/api";
@@ -48,6 +48,7 @@ const NAV_GROUPS = [
     title: "策略实验室",
     items: [
       { to: "/alpha-zoo", icon: Layers, label: "因子工厂" },
+      { to: "/redeem-codes", icon: Ticket, label: "兑换码管理" },
     ],
   },
 ];
