@@ -54,25 +54,21 @@ def _cache_set(key: str, val: dict[str, Any]) -> None:
 _FEEDS = {
     # RSSHub sources (only working ones)
     "华尔街见闻-全球": "/wallstreetcn/news/global",
-    "华尔街见闻-中国": "/wallstreetcn/news/china",
-    "华尔街见闻-A股": "/wallstreetcn/news/a-stock",
 
-    # Additional RSSHub routes to test
-    "知乎-财经": "/zhihu/topic/19552497",
-    "知乎-股票": "/zhihu/topic/19550887",
-    "界面新闻": "/jiemian",
-    "澎湃新闻": "/thepaper",
+    # Direct RSS feeds (AI & Tech news)
+    "OpenAI Blog": "https://openai.com/news/rss.xml",
+    "GitHub Blog": "https://github.blog/feed/",
+    "Last Week in AI": "https://lastweekin.ai/feed",
+    "Sebastian Raschka": "https://magazine.sebastianraschka.com/feed",
 }
 
 # Source metadata for display
 _SOURCE_META = {
     "华尔街见闻-全球": {"color": "#9C27B0", "priority": 1, "desc": "全球宏观视角"},
-    "华尔街见闻-中国": {"color": "#E91E63", "priority": 2, "desc": "中国经济动态"},
-    "华尔街见闻-A股": {"color": "#673AB7", "priority": 3, "desc": "A股市场分析"},
-    "知乎-财经": {"color": "#00BCD4", "priority": 4, "desc": "财经话题讨论"},
-    "知乎-股票": {"color": "#009688", "priority": 5, "desc": "股票投资分享"},
-    "界面新闻": {"color": "#FF5722", "priority": 6, "desc": "商业财经报道"},
-    "澎湃新闻": {"color": "#795548", "priority": 7, "desc": "时政财经要闻"},
+    "OpenAI Blog": {"color": "#10A37F", "priority": 2, "desc": "AI 前沿动态"},
+    "GitHub Blog": {"color": "#24292E", "priority": 3, "desc": "开发者生态"},
+    "Last Week in AI": {"color": "#FF6B6B", "priority": 4, "desc": "AI 周报精选"},
+    "Sebastian Raschka": {"color": "#4ECDC4", "priority": 5, "desc": "机器学习研究"},
 }
 
 
@@ -81,21 +77,26 @@ _SOURCE_META = {
 # ---------------------------------------------------------------------------
 
 def _fetch_rsshub_feed(route: str, timeout: int = 10) -> list[dict[str, Any]]:
-    """Fetch a single RSSHub route, parse items, return structured articles."""
+    """Fetch a single RSSHub route or direct RSS URL, parse items, return structured articles."""
     import os
     import requests as http
     import xml.etree.ElementTree as ET
     from bs4 import BeautifulSoup
 
-    base = os.getenv("RSSHUB_URL", "http://localhost:1200").rstrip("/")
-    url = f"{base}{route}"
+    # Determine URL: if route starts with http(s), use it directly; otherwise use RSSHub
+    if route.startswith("http://") or route.startswith("https://"):
+        url = route
+    else:
+        base = os.getenv("RSSHUB_URL", "http://localhost:1200").rstrip("/")
+        url = f"{base}{route}"
+
     try:
         resp = http.get(url, timeout=timeout)
     except http.RequestException as exc:
-        logger.info("rsshub_routes: fetch %s failed: %s", route, exc)
+        logger.info("rsshub_routes: fetch %s failed: %s", url, exc)
         return []
     if resp.status_code != 200 or not resp.content:
-        logger.info("rsshub_routes: fetch %s returned %s", route, resp.status_code)
+        logger.info("rsshub_routes: fetch %s returned %s", url, resp.status_code)
         return []
 
     try:
