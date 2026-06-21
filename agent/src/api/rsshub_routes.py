@@ -52,24 +52,27 @@ def _cache_set(key: str, val: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 _FEEDS = {
-    "财联社电报": "/cls/telegraph",
-    "东方财富-财经": "/eastmoney/news/cjpl",
-    "雪球热帖": "/xueqiu/hots",
-    "同花顺-财经": "/10jqka/cjzx",
-    "华尔街见闻": "/wallstreetcn/news/global",
-    "新浪财经": "/sina/finance",
-    "金十数据-快讯": "/jin10/",
+    # RSSHub sources (only working ones)
+    "华尔街见闻-全球": "/wallstreetcn/news/global",
+    "华尔街见闻-中国": "/wallstreetcn/news/china",
+    "华尔街见闻-A股": "/wallstreetcn/news/a-stock",
+
+    # Additional RSSHub routes to test
+    "知乎-财经": "/zhihu/topic/19552497",
+    "知乎-股票": "/zhihu/topic/19550887",
+    "界面新闻": "/jiemian",
+    "澎湃新闻": "/thepaper",
 }
 
 # Source metadata for display
 _SOURCE_META = {
-    "财联社电报": {"color": "#E53935", "priority": 1, "desc": "快讯电报，实时重要"},
-    "东方财富-财经": {"color": "#FF9800", "priority": 2, "desc": "综合财经要闻"},
-    "雪球热帖": {"color": "#4CAF50", "priority": 3, "desc": "投资者热门讨论"},
-    "同花顺-财经": {"color": "#2196F3", "priority": 4, "desc": "A股市场动态"},
-    "华尔街见闻": {"color": "#9C27B0", "priority": 5, "desc": "全球宏观视角"},
-    "新浪财经": {"color": "#FF5722", "priority": 6, "desc": "主流财经门户"},
-    "金十数据-快讯": {"color": "#00BCD4", "priority": 7, "desc": "数据驱动快讯"},
+    "华尔街见闻-全球": {"color": "#9C27B0", "priority": 1, "desc": "全球宏观视角"},
+    "华尔街见闻-中国": {"color": "#E91E63", "priority": 2, "desc": "中国经济动态"},
+    "华尔街见闻-A股": {"color": "#673AB7", "priority": 3, "desc": "A股市场分析"},
+    "知乎-财经": {"color": "#00BCD4", "priority": 4, "desc": "财经话题讨论"},
+    "知乎-股票": {"color": "#009688", "priority": 5, "desc": "股票投资分享"},
+    "界面新闻": {"color": "#FF5722", "priority": 6, "desc": "商业财经报道"},
+    "澎湃新闻": {"color": "#795548", "priority": 7, "desc": "时政财经要闻"},
 }
 
 
