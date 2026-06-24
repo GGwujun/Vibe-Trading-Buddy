@@ -70,13 +70,15 @@ function StockFlow({ title, items, tone }: { title: string; items: CapitalStockI
 /** 9. 主线 & 观察板块. */
 export function MainThemes({ themes }: { themes: MarketThemes | null | undefined }) {
   if (!themes) return <EmptyHint>板块数据暂不可用</EmptyHint>;
+  const mainLines = themes.main_lines ?? [];
+  const observe = themes.observe ?? [];
   return (
     <Panel title="主线 & 观察板块">
       <div className="space-y-2">
         <div>
           <div className="mb-1 text-[10px] text-muted-foreground">主线（领涨）</div>
           <div className="flex flex-wrap gap-1">
-            {themes.main_lines.length ? themes.main_lines.map((m) => (
+            {mainLines.length ? mainLines.map((m) => (
               <span key={m.name} className="rounded bg-red-500/15 px-2 py-0.5 text-[11px]">
                 {m.name} <Pct value={m.change_pct} />
               </span>
@@ -86,7 +88,7 @@ export function MainThemes({ themes }: { themes: MarketThemes | null | undefined
         <div>
           <div className="mb-1 text-[10px] text-muted-foreground">观察</div>
           <div className="flex flex-wrap gap-1">
-            {themes.observe.length ? themes.observe.map((m) => (
+            {observe.length ? observe.map((m) => (
               <span key={m.name} className="rounded bg-muted/60 px-2 py-0.5 text-[11px]">
                 {m.name} <Pct value={m.change_pct} />
               </span>

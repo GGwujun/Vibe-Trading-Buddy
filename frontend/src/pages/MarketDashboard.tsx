@@ -57,8 +57,8 @@ export function MarketDashboard() {
       m.set(sym, entry);
     };
     const ov = data?.market_overview;
-    ov?.top_gainers.forEach((r) => push(r.symbol, r.name, r.price, r.change_pct));
-    ov?.top_losers.forEach((r) => push(r.symbol, r.name, r.price, r.change_pct));
+    (ov?.top_gainers ?? []).forEach((r) => push(r.symbol, r.name, r.price, r.change_pct));
+    (ov?.top_losers ?? []).forEach((r) => push(r.symbol, r.name, r.price, r.change_pct));
     return m;
   }, [data]);
 
@@ -120,7 +120,7 @@ export function MarketDashboard() {
         )}
 
         {/* ① 顶部指数轮动 */}
-        {ov && <IndexTicker indices={ov.indices} />}
+        <IndexTicker indices={ov?.indices ?? []} />
 
         {/* ②③ 一句话总结 + 情绪温度 */}
         <MarketSummary breadth={breadth} sentiment={sentiment} environment={environment} />

@@ -94,6 +94,7 @@ export function KLinePanel({ codes }: { codes: { symbol: string; name: string }[
 /** 6. 涨跌停情况 (real pool). */
 export function LimitBoard({ pools }: { pools: MarketPools | null | undefined }) {
   if (!pools) return <EmptyHint>盘后/今日涨停池未同步</EmptyHint>;
+  const limitUpList = pools.limit_up_list ?? [];
   return (
     <div className="space-y-2">
       <div className="grid grid-cols-2 gap-2">
@@ -106,9 +107,9 @@ export function LimitBoard({ pools }: { pools: MarketPools | null | undefined })
           <div className="text-[10px] text-muted-foreground">跌停</div>
         </div>
       </div>
-      {pools.limit_up_list.length > 0 && (
+      {limitUpList.length > 0 && (
         <div className="flex flex-wrap gap-1">
-          {pools.limit_up_list.slice(0, 16).map((s) => (
+          {limitUpList.slice(0, 16).map((s) => (
             <span key={s.symbol} className="rounded bg-muted/60 px-1.5 py-0.5 text-[10px]">
               {s.name}
               {s.days > 1 && <b className="ml-0.5 text-red-500">{s.days}板</b>}
