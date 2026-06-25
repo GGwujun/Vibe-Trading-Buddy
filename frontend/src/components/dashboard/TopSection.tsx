@@ -8,7 +8,6 @@ import type {
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-/** 1. 顶部指数轮动条 — auto-rotates highlight among indices. */
 export function IndexTicker({ indices }: { indices: MarketIndexRow[] }) {
   const [active, setActive] = useState(0);
   useEffect(() => {
@@ -41,7 +40,6 @@ export function IndexTicker({ indices }: { indices: MarketIndexRow[] }) {
   );
 }
 
-/** 2+3. 一句话总结 + 盘面速览 + 情绪阶段. */
 export function MarketSummary({
   breadth,
   sentiment,
@@ -79,7 +77,10 @@ export function MarketSummary({
               <div className="text-muted-foreground">广度 {sentiment.breadth_strength > 0 ? "+" : ""}{sentiment.breadth_strength}</div>
             </div>
             <div className="ml-auto h-2 w-16 overflow-hidden rounded-full bg-muted">
-              <div className={cn("h-full", temp >= 60 ? "bg-red-500" : temp >= 40 ? "bg-amber-500" : "bg-blue-500")} style={{ width: `${temp}%` }} />
+              <div
+                className={cn("h-full", temp >= 60 ? "bg-red-500" : temp >= 40 ? "bg-amber-500" : "bg-blue-500")}
+                style={{ width: `${Math.max(0, Math.min(100, temp))}%` }}
+              />
             </div>
           </div>
         ) : (
@@ -90,7 +91,6 @@ export function MarketSummary({
   );
 }
 
-/** Breadth grid: 涨跌平家数 + 涨跌停 + 成交额. */
 export function BreadthPanel({ breadth, limitUpReal }: { breadth: MarketBreadth | undefined; limitUpReal?: boolean }) {
   if (!breadth) return <EmptyHint>盘面数据暂不可用</EmptyHint>;
   const cells = [
@@ -99,7 +99,7 @@ export function BreadthPanel({ breadth, limitUpReal }: { breadth: MarketBreadth 
     { label: "平盘", value: breadth.flat, tone: "text-muted-foreground" },
     { label: `涨停${limitUpReal ? "" : "≈"}`, value: breadth.limit_up, tone: "text-red-500" },
     { label: `跌停${limitUpReal ? "" : "≈"}`, value: breadth.limit_down, tone: "text-green-500" },
-    { label: "成交额(亿)", value: breadth.turnover_billion, tone: "text-foreground" },
+    { label: "成交额 亿", value: breadth.turnover_billion, tone: "text-foreground" },
   ];
   return (
     <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">

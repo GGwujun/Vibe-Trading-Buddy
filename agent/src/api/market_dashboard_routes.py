@@ -856,6 +856,578 @@ def _close_review(
     }
 
 
+def _project_suffix(code: str) -> str:
+    digits = str(code or "").split(".", 1)[0]
+    if str(code).upper().endswith(".SH") or digits.startswith(("5", "6", "9")):
+        return ".SH"
+    if str(code).upper().endswith(".BJ") or digits.startswith(("4", "8")):
+        return ".BJ"
+    return ".SZ"
+
+
+def _clean_stock_rows(df: pd.DataFrame, limit: int = 8) -> list[dict[str, Any]]:
+    code_col = _column(df, ("代码", "code", "symbol"), 1)
+    name_col = _column(df, ("名称", "name"), 2)
+    price_col = _column(df, ("最新价", "price", "trade"), 3)
+    change_col = _column(df, ("涨跌幅", "change_pct", "changepercent"), 4)
+    if not code_col or not name_col:
+        return []
+    rows: list[dict[str, Any]] = []
+    for _, row in df.head(limit).iterrows():
+        code = str(row.get(code_col, "")).strip()
+        rows.append({
+            "symbol": code,
+            "name": str(row.get(name_col, "")).strip() or code,
+            "price": round(_number(row.get(price_col)) if price_col else 0, 2),
+            "change_pct": round(_number(row.get(change_col)) if change_col else 0, 2),
+        })
+    return rows
+
+
+def _clean_breadth_from_spot(df: pd.DataFrame) -> dict[str, Any]:
+    code_col = _column(df, ("代码", "code", "symbol"), 1)
+    change_col = _column(df, ("涨跌幅", "change_pct", "changepercent"), 4)
+    amount_col = _column(df, ("成交额", "amount", "turnover"), 6)
+    price_col = _column(df, ("最新价", "price", "trade"), 3)
+    working = df.copy()
+    if code_col:
+        working = working[working[code_col].astype(str).str.extract(r"(\d{6})", expand=False).notna()]
+    if price_col:
+        working = working[working[price_col].map(_number) > 0]
+    changes = working[change_col].map(_number) if change_col else pd.Series(dtype=float)
+    amount = working[amount_col].map(_number).sum() if amount_col else 0.0
+    return {
+        "total": int(len(working)),
+        "advancers": int((changes > 0).sum()),
+        "decliners": int((changes < 0).sum()),
+        "flat": int((changes == 0).sum()),
+        "limit_up": int((changes >= 9.8).sum()),
+        "limit_down": int((changes <= -9.8).sum()),
+        "turnover_billion": round(amount / 100_000_000, 2),
+    }
+
+
+def _clean_index_rows(df: pd.DataFrame) -> list[dict[str, Any]]:
+    code_col = _column(df, ("代码", "code", "symbol"), 1)
+    name_col = _column(df, ("名称", "name"), 2)
+    price_col = _column(df, ("最新价", "price", "trade"), 3)
+    change_col = _column(df, ("涨跌幅", "change_pct", "changepercent"), 4)
+    if not code_col or not name_col:
+        return []
+    preferred_codes = ("000001", "399001", "399006", "000300", "000905", "000852", "000688")
+    rows: list[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        code = str(row.get(code_col, "")).strip()
+        name = str(row.get(name_col, "")).strip()
+        if not any(key in code for key in preferred_codes):
+            continue
+        rows.append({
+            "symbol": code,
+            "name": name or code,
+            "price": round(_number(row.get(price_col)) if price_col else 0, 2),
+            "change_pct": round(_number(row.get(change_col)) if change_col else 0, 2),
+        })
+        if len(rows) >= 7:
+            break
+    return rows
+
+
+def _clean_sector_rows(df: pd.DataFrame, limit: int = 10) -> list[dict[str, Any]]:
+    name_col = _column(df, ("板块名称", "名称", "name"), 1)
+    change_col = _column(df, ("涨跌幅", "change_pct"), 5)
+    up_col = _column(df, ("上涨家数", "advancers"), 8)
+    down_col = _column(df, ("下跌家数", "decliners"), 9)
+    leader_col = _column(df, ("领涨股票", "leader"), 10)
+    if not name_col:
+        return []
+    working = df.copy()
+    if change_col:
+        working["_change"] = working[change_col].map(_number)
+        working = working.sort_values("_change", ascending=False)
+    rows: list[dict[str, Any]] = []
+    for _, row in working.head(limit).iterrows():
+        rows.append({
+            "name": str(row.get(name_col, "")).strip(),
+            "change_pct": round(_number(row.get(change_col)) if change_col else 0, 2),
+            "advancers": int(_number(row.get(up_col))) if up_col else 0,
+            "decliners": int(_number(row.get(down_col))) if down_col else 0,
+            "leader": str(row.get(leader_col, "")).strip() if leader_col else "",
+        })
+    return rows
+
+
+def _db_market_overview() -> dict[str, Any]:
+    store = _market_store()
+    if store is None:
+        raise RuntimeError("market store unavailable")
+    conn = store._conn
+
+    trade_row = conn.execute("SELECT MAX(trade_date) AS d FROM bars_daily").fetchone()
+    trade_date = trade_row["d"] if trade_row and trade_row["d"] else None
+    if not trade_date:
+        raise RuntimeError("local bars_daily is empty")
+
+    rows = conn.execute(
+        """
+        SELECT b.code, b.close, b.rise_rate, b.total_amt, COALESCE(s.name, b.name, b.code) AS name
+        FROM bars_daily b
+        LEFT JOIN security_master s ON s.code = b.code
+        WHERE b.trade_date = ?
+        """,
+        (trade_date,),
+    ).fetchall()
+    changes = [float(r["rise_rate"] or 0) for r in rows]
+    turnover = sum(float(r["total_amt"] or 0) for r in rows)
+    top = sorted(rows, key=lambda r: float(r["rise_rate"] or 0), reverse=True)
+    bottom = sorted(rows, key=lambda r: float(r["rise_rate"] or 0))
+
+    def _stock(row: Any) -> dict[str, Any]:
+        return {
+            "symbol": row["code"],
+            "name": row["name"] or row["code"],
+            "price": round(float(row["close"] or 0), 2),
+            "change_pct": round(float(row["rise_rate"] or 0), 2),
+        }
+
+    idx_date_row = conn.execute("SELECT MAX(trade_date) AS d FROM index_daily").fetchone()
+    idx_date = idx_date_row["d"] if idx_date_row and idx_date_row["d"] else None
+    index_rows: list[dict[str, Any]] = []
+    if idx_date:
+        name_map = {
+            "000001.SH": "上证指数",
+            "399001.SZ": "深证成指",
+            "399006.SZ": "创业板指",
+            "000300.SH": "沪深300",
+            "000905.SH": "中证500",
+            "000852.SH": "中证1000",
+            "000688.SH": "科创50",
+        }
+        for r in conn.execute(
+            "SELECT code, close, pct_chg FROM index_daily WHERE trade_date = ? ORDER BY code",
+            (idx_date,),
+        ).fetchall():
+            index_rows.append({
+                "symbol": r["code"],
+                "name": name_map.get(r["code"], r["code"]),
+                "price": round(float(r["close"] or 0), 2),
+                "change_pct": round(float(r["pct_chg"] or 0), 2),
+            })
+
+    return {
+        "as_of": _now_cst().isoformat(),
+        "source": "market_db",
+        "trade_date": trade_date,
+        "breadth": {
+            "total": len(rows),
+            "advancers": sum(1 for v in changes if v > 0),
+            "decliners": sum(1 for v in changes if v < 0),
+            "flat": sum(1 for v in changes if v == 0),
+            "limit_up": sum(1 for v in changes if v >= 9.8),
+            "limit_down": sum(1 for v in changes if v <= -9.8),
+            "turnover_billion": round(turnover / 100_000_000, 2),
+        },
+        "indices": index_rows,
+        "hot_sectors": [],
+        "top_gainers": [_stock(r) for r in top[:8]],
+        "top_losers": [_stock(r) for r in bottom[:8]],
+    }
+
+
+def _load_market_overview() -> dict[str, Any]:
+    try:
+        spot = _fetch_a_share_spot()
+        if spot is None or spot.empty:
+            raise RuntimeError("A-share spot data unavailable")
+        change_col = _column(spot, ("涨跌幅", "change_pct", "changepercent"), 4)
+        sorted_spot = (
+            spot.assign(_change=spot[change_col].map(_number)).sort_values("_change", ascending=False)
+            if change_col else spot
+        )
+        industry_rows: list[dict[str, Any]] = []
+        try:
+            industry = _fetch_industry_spot()
+            if industry is not None and not industry.empty:
+                industry_rows = _clean_sector_rows(industry)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("market overview: industry fetch failed: %s", exc)
+        index_rows: list[dict[str, Any]] = []
+        try:
+            index_df = _fetch_index_spot()
+            if index_df is not None and not index_df.empty:
+                index_rows = _clean_index_rows(index_df)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("market overview: index fetch failed: %s", exc)
+        return {
+            "as_of": _now_cst().isoformat(),
+            "source": "akshare",
+            "breadth": _clean_breadth_from_spot(spot),
+            "indices": index_rows,
+            "hot_sectors": industry_rows,
+            "top_gainers": _clean_stock_rows(sorted_spot, limit=8),
+            "top_losers": _clean_stock_rows(
+                sorted_spot.sort_values("_change", ascending=True) if "_change" in sorted_spot else spot,
+                limit=8,
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.info("market overview: live source failed, using local DB: %s", exc)
+        return _db_market_overview()
+
+
+def _compute_sentiment(
+    market_overview: dict[str, Any],
+    capital: dict[str, Any] | None,
+    pools: dict[str, Any] | None,
+) -> dict[str, Any]:
+    breadth = market_overview.get("breadth") or {}
+    total = int(breadth.get("total") or 0)
+    adv = int(breadth.get("advancers") or 0)
+    dec = int(breadth.get("decliners") or 0)
+    limit_up = int((pools or {}).get("limit_up_count") or breadth.get("limit_up") or 0)
+    max_height = int((pools or {}).get("max_limit_up_height") or 0)
+    adv_ratio = adv / total if total else 0.5
+    breadth_strength = (adv - dec) / total if total else 0.0
+    breadth_heat = adv_ratio * 100.0
+    limit_heat = min(100.0, (limit_up ** 0.6) * 18.0)
+    sector_net = 0.0
+    if capital and capital.get("sector_top5"):
+        sector_net = sum(s.get("main_net", 0) for s in capital["sector_top5"]) / 1e8
+    capital_heat = max(0.0, min(100.0, 50.0 + sector_net * 4.0))
+    temperature = round(max(0.0, min(100.0, 0.4 * breadth_heat + 0.3 * limit_heat + 0.3 * capital_heat)), 1)
+    if temperature >= 75:
+        label = "过热"
+    elif temperature >= 60:
+        label = "偏热"
+    elif temperature >= 40:
+        label = "温和"
+    elif temperature >= 25:
+        label = "偏冷"
+    else:
+        label = "冰冷"
+    if temperature >= 70 and max_height >= 4:
+        stage, stage_reason = "高潮", "情绪高温且连板高度较高，投机情绪强"
+    elif temperature >= 60 and breadth_strength > 0.2:
+        stage, stage_reason = "升温", "涨多跌少且温度上行，赚钱效应扩散"
+    elif temperature <= 25 and breadth_strength < -0.2:
+        stage, stage_reason = "冰点", "普跌且温度极低，恐慌释放中"
+    elif breadth_strength < 0 and temperature < 50:
+        stage, stage_reason = "退潮", "跌多涨少，高位情绪回落"
+    elif 35 <= temperature <= 55 and abs(breadth_strength) < 0.15:
+        stage, stage_reason = "震荡", "温度中性、多空均衡，等待方向选择"
+    else:
+        stage, stage_reason = "回暖", "信号边际改善，适合观察主线承接"
+    return {
+        "as_of": _now_cst().isoformat(),
+        "temperature": temperature,
+        "label": label,
+        "breadth_strength": round(breadth_strength, 3),
+        "adv_dec_diff": adv - dec,
+        "stage": stage,
+        "stage_reason": stage_reason,
+        "summary": f"情绪 {temperature:.0f}/{label}，涨跌广度 {breadth_strength:+.2f}，涨停 {limit_up}，连板高度 {max_height}",
+        "formulas": {
+            "temperature": "0.4*涨跌家数比 + 0.3*涨停热度 + 0.3*行业主力资金",
+            "breadth_strength": "(上涨家数-下跌家数)/总数，范围 -1 到 +1",
+            "stage": "温度、连板高度、涨跌方向组合判定",
+        },
+    }
+
+
+def _market_environment(market_overview: dict[str, Any], sentiment: dict[str, Any] | None) -> dict[str, Any]:
+    breadth = market_overview.get("breadth") or {}
+    total = int(breadth.get("total") or 0)
+    adv = int(breadth.get("advancers") or 0)
+    turnover = float(breadth.get("turnover_billion") or 0)
+    adv_ratio = adv / total if total else 0.5
+    strength = float((sentiment or {}).get("breadth_strength", 0.0) or 0.0)
+    if adv_ratio > 0.75 and turnover > 8000:
+        regime = "放量普涨"
+    elif adv_ratio > 0.7:
+        regime = "普涨"
+    elif adv_ratio < 0.25 and turnover > 8000:
+        regime = "放量普跌"
+    elif adv_ratio < 0.3:
+        regime = "普跌"
+    elif abs(strength) < 0.15:
+        regime = "震荡分化"
+    else:
+        regime = "结构行情"
+    return {"regime": regime, "turnover_billion": round(turnover, 1), "adv_ratio": round(adv_ratio, 3)}
+
+
+def _market_mood(recommendations: list[dict[str, Any]], opportunities: list[dict[str, Any]]) -> dict[str, str]:
+    if not recommendations and not opportunities:
+        return {"label": "等待数据", "tone": "neutral", "detail": "推荐、机会池暂未返回，先检查数据源状态。"}
+    scores = []
+    for item in recommendations:
+        base = float(item.get("score", 0.5) or 0.5)
+        ai = float((item.get("ai_review") or {}).get("score", base) or base)
+        factor = float((item.get("factor_review") or {}).get("score", base) or base)
+        scores.append(base * 0.5 + ai * 0.3 + factor * 0.2)
+    avg_score = sum(scores) / len(scores) if scores else 0
+    hot_count = sum(1 for item in opportunities if float(item.get("change_pct", 0) or 0) >= 5)
+    weak_count = sum(1 for item in opportunities if float(item.get("change_pct", 0) or 0) < 0)
+    if avg_score >= 0.72 or hot_count >= 4:
+        return {"label": "进攻观察", "tone": "good", "detail": "高分候选较多，适合重点跟踪量价确认。"}
+    if weak_count > hot_count and len(recommendations) < 3:
+        return {"label": "防守优先", "tone": "bad", "detail": "有效候选偏少，优先控制仓位。"}
+    return {"label": "均衡观察", "tone": "warn", "detail": "有候选但强度未压倒性，适合分层跟踪。"}
+
+
+def _compute_sentiment(
+    market_overview: dict[str, Any],
+    capital: dict[str, Any] | None,
+    pools: dict[str, Any] | None,
+) -> dict[str, Any]:
+    breadth = market_overview.get("breadth") or {}
+    total = int(breadth.get("total") or 0)
+    adv = int(breadth.get("advancers") or 0)
+    dec = int(breadth.get("decliners") or 0)
+    limit_up = int((pools or {}).get("limit_up_count") or breadth.get("limit_up") or 0)
+    max_height = int((pools or {}).get("max_limit_up_height") or 0)
+    adv_ratio = adv / total if total else 0.5
+    breadth_strength = (adv - dec) / total if total else 0.0
+    breadth_heat = adv_ratio * 100.0
+    limit_heat = min(100.0, (limit_up ** 0.6) * 18.0)
+    sector_net = 0.0
+    if capital and capital.get("sector_top5"):
+        sector_net = sum(s.get("main_net", 0) for s in capital["sector_top5"]) / 1e8
+    capital_heat = max(0.0, min(100.0, 50.0 + sector_net * 4.0))
+    temperature = round(max(0.0, min(100.0, 0.4 * breadth_heat + 0.3 * limit_heat + 0.3 * capital_heat)), 1)
+
+    if temperature >= 75:
+        label = "过热"
+    elif temperature >= 60:
+        label = "偏热"
+    elif temperature >= 40:
+        label = "温和"
+    elif temperature >= 25:
+        label = "偏冷"
+    else:
+        label = "冰冷"
+
+    if temperature >= 70 and max_height >= 4:
+        stage, stage_reason = "高潮", "情绪温度较高且连板高度抬升，投机情绪偏强。"
+    elif temperature >= 60 and breadth_strength > 0.2:
+        stage, stage_reason = "升温", "上涨家数占优，赚钱效应正在扩散。"
+    elif temperature <= 25 and breadth_strength < -0.2:
+        stage, stage_reason = "冰点", "普跌且情绪温度很低，优先等待恐慌释放。"
+    elif breadth_strength < 0 and temperature < 50:
+        stage, stage_reason = "退潮", "下跌家数占优，高位情绪存在回落压力。"
+    elif 35 <= temperature <= 55 and abs(breadth_strength) < 0.15:
+        stage, stage_reason = "震荡", "温度中性、多空均衡，等待方向选择。"
+    else:
+        stage, stage_reason = "回暖", "边际信号改善，适合观察主线承接。"
+
+    return {
+        "as_of": _now_cst().isoformat(),
+        "temperature": temperature,
+        "label": label,
+        "breadth_strength": round(breadth_strength, 3),
+        "adv_dec_diff": adv - dec,
+        "stage": stage,
+        "stage_reason": stage_reason,
+        "summary": f"情绪 {temperature:.0f}/{label}，涨跌广度 {breadth_strength:+.2f}，涨停 {limit_up}，连板高度 {max_height}",
+        "formulas": {
+            "temperature": "0.4*涨跌家数热度 + 0.3*涨停热度 + 0.3*行业主力资金",
+            "breadth_strength": "(上涨家数-下跌家数)/总数，范围 -1 到 +1",
+            "stage": "温度、连板高度、涨跌方向组合判定",
+        },
+    }
+
+
+def _market_environment(market_overview: dict[str, Any], sentiment: dict[str, Any] | None) -> dict[str, Any]:
+    breadth = market_overview.get("breadth") or {}
+    total = int(breadth.get("total") or 0)
+    adv = int(breadth.get("advancers") or 0)
+    turnover = float(breadth.get("turnover_billion") or 0)
+    adv_ratio = adv / total if total else 0.5
+    strength = float((sentiment or {}).get("breadth_strength", 0.0) or 0.0)
+    if adv_ratio > 0.75 and turnover > 8000:
+        regime = "放量普涨"
+    elif adv_ratio > 0.7:
+        regime = "普涨"
+    elif adv_ratio < 0.25 and turnover > 8000:
+        regime = "放量普跌"
+    elif adv_ratio < 0.3:
+        regime = "普跌"
+    elif abs(strength) < 0.15:
+        regime = "震荡分化"
+    else:
+        regime = "结构行情"
+    return {"regime": regime, "turnover_billion": round(turnover, 1), "adv_ratio": round(adv_ratio, 3)}
+
+
+def _market_mood(recommendations: list[dict[str, Any]], opportunities: list[dict[str, Any]]) -> dict[str, str]:
+    if not recommendations and not opportunities:
+        return {"label": "等待数据", "tone": "neutral", "detail": "推荐和机会池暂未返回，先检查数据源状态。"}
+
+    scores = []
+    for item in recommendations:
+        base = float(item.get("score", 0.5) or 0.5)
+        ai = float((item.get("ai_review") or {}).get("score", base) or base)
+        factor = float((item.get("factor_review") or {}).get("score", base) or base)
+        scores.append(base * 0.5 + ai * 0.3 + factor * 0.2)
+    avg_score = sum(scores) / len(scores) if scores else 0
+    hot_count = sum(1 for item in opportunities if float(item.get("change_pct", 0) or 0) >= 5)
+    weak_count = sum(1 for item in opportunities if float(item.get("change_pct", 0) or 0) < 0)
+
+    if avg_score >= 0.72 or hot_count >= 4:
+        return {"label": "进攻观察", "tone": "good", "detail": "高分候选较多，盘中适合重点跟踪量价确认。"}
+    if weak_count > hot_count and len(recommendations) < 3:
+        return {"label": "防守优先", "tone": "bad", "detail": "有效候选偏少，优先控制仓位并等待确认。"}
+    return {"label": "均衡观察", "tone": "warn", "detail": "有候选但强度未压倒性，适合分层跟踪。"}
+
+
+def _tail_action(score: float, change_pct: float, risk_text: str = "") -> tuple[str, str]:
+    risk_lower = risk_text.lower()
+    if change_pct >= 7:
+        return "等回落", "涨幅偏高，尾盘不追价，等待回踩或次日确认。"
+    if score >= 0.72 and change_pct >= 0:
+        return "重点跟踪", "强度和当日表现较好，尾盘重点观察承接与收盘位置。"
+    if score >= 0.58:
+        return "轻仓观察", "信号有效但强度一般，适合小仓位观察或加入明日清单。"
+    if "risk" in risk_lower or "风险" in risk_text:
+        return "风险规避", "风险提示较强，尾盘先规避，等待新证据。"
+    return "等待确认", "信号不足以支持尾盘动作，继续观察量价和事件变化。"
+
+
+def _morning_brief(
+    market_overview: dict[str, Any],
+    recommendations: list[dict[str, Any]],
+    news: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    opportunities: list[dict[str, Any]],
+) -> dict[str, Any]:
+    breadth = market_overview.get("breadth") or {}
+    morning_recs = [item for item in recommendations if item.get("slot") == "morning"]
+    focus = morning_recs[:5] or sorted(opportunities, key=lambda item: float(item.get("confidence", 0) or 0), reverse=True)[:5]
+    advancers = int(breadth.get("advancers", 0) or 0)
+    decliners = int(breadth.get("decliners", 0) or 0)
+    risk_note = "市场广度偏强，可重点观察高置信候选和主线承接。"
+    if decliners > advancers:
+        risk_note = "下跌家数多于上涨家数，早盘先控仓，等待指数与主线确认。"
+
+    return {
+        "title": "早盘内参",
+        "as_of": market_overview.get("as_of") or _now_cst().isoformat(),
+        "market_breadth": breadth,
+        "indices": market_overview.get("indices", []),
+        "top_news": news[:5],
+        "key_events": _top_events(events, limit=5),
+        "focus_symbols": [
+            {
+                "symbol": item.get("symbol"),
+                "name": item.get("name"),
+                "reason": item.get("reason") or item.get("summary") or item.get("category_label", ""),
+                "score": round(_score_recommendation(item), 3) if "slot" in item else round(float(item.get("confidence", 0.5) or 0.5), 3),
+            }
+            for item in focus
+        ],
+        "risk_note": risk_note,
+    }
+
+
+def _intraday_monitor(
+    market_overview: dict[str, Any],
+    opportunities: list[dict[str, Any]],
+    tasks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    alerts: list[dict[str, Any]] = []
+    for item in opportunities[:8]:
+        change = float(item.get("change_pct", 0) or 0)
+        confidence = float(item.get("confidence", 0) or 0)
+        if change >= 6:
+            level = "hot"
+            message = "涨幅偏高，关注冲高回落风险。"
+        elif confidence >= 0.75:
+            level = "focus"
+            message = "信号强度较高，等待量价确认。"
+        else:
+            level = "watch"
+            message = "纳入观察池。"
+        alerts.append({
+            "symbol": item.get("symbol"),
+            "name": item.get("name"),
+            "level": level,
+            "change_pct": round(change, 2),
+            "message": message,
+        })
+
+    return {
+        "title": "盘中监控",
+        "breadth": market_overview.get("breadth") or {},
+        "hot_sectors": market_overview.get("hot_sectors", [])[:8],
+        "alerts": alerts,
+        "scheduled_tasks": [
+            {
+                "symbol": task.get("symbol"),
+                "name": task.get("name"),
+                "time": task.get("time"),
+                "enabled": bool(task.get("enabled")),
+                "last_status": task.get("last_status"),
+            }
+            for task in tasks[:20]
+        ],
+    }
+
+
+def _tail_strategy(tail_decisions: list[dict[str, Any]], market_overview: dict[str, Any]) -> dict[str, Any]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in tail_decisions:
+        grouped.setdefault(str(item.get("action", "等待确认")), []).append(item)
+    return {
+        "title": "尾盘策略",
+        "decisions": tail_decisions,
+        "groups": grouped,
+        "rules": [
+            "涨幅过高的候选不追价，优先等回落或次日确认。",
+            "重点跟踪标的只在收盘承接良好时保留到明日观察。",
+            "市场广度走弱时降低尾盘动作优先级。",
+        ],
+        "breadth": market_overview.get("breadth") or {},
+    }
+
+
+def _close_review(
+    recommendations: list[dict[str, Any]],
+    market_overview: dict[str, Any],
+    tail_decisions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    returns = [
+        float((item.get("performance") or {}).get("latest_return_pct"))
+        for item in recommendations
+        if (item.get("performance") or {}).get("latest_return_pct") is not None
+    ]
+    avg_return = round(sum(returns) / len(returns), 2) if returns else None
+    win_rate = round(sum(1 for value in returns if value > 0) / len(returns) * 100, 1) if returns else None
+    tomorrow_watch = [
+        {
+            "symbol": item.get("symbol"),
+            "name": item.get("name"),
+            "action": item.get("action"),
+            "reason": item.get("reason"),
+        }
+        for item in tail_decisions[:8]
+    ]
+    return {
+        "title": "收盘复盘",
+        "summary": {
+            "recommendation_count": len(recommendations),
+            "tracked_return_count": len(returns),
+            "avg_latest_return_pct": avg_return,
+            "win_rate": win_rate,
+        },
+        "breadth": market_overview.get("breadth") or {},
+        "tomorrow_watch": tomorrow_watch,
+        "review_questions": [
+            "今日推荐是否跑赢市场广度？",
+            "尾盘强势股是否有真实承接，而不是单纯拉高？",
+            "明日优先观察哪些事件和板块扩散？",
+        ],
+    }
+
+
 def register_market_dashboard_routes(
     app: FastAPI,
     require_auth: AuthDep | None = None,
@@ -976,24 +1548,77 @@ def register_market_dashboard_routes(
     async def get_market_bars(code: str, days: int = 60) -> dict[str, Any]:
         """Daily OHLCV bars for the K-line chart (DB-backed, no intraday)."""
         raw = (code or "").strip()
-        # Normalize sh/sz prefixes and .SH/.SZ suffix to bare 6-digit code.
-        bare = raw.replace("sh", "").replace("sz", "").replace(".SH", "").replace(".SZ", "").replace(".", "")
+        # Normalize sh/sz prefixes and .SH/.SZ suffix to a project code.
+        bare = (
+            raw.lower()
+            .replace("sh", "")
+            .replace("sz", "")
+            .replace(".sh", "")
+            .replace(".sz", "")
+            .replace(".bj", "")
+            .replace(".", "")
+            .upper()
+        )
+        suffix = _project_suffix(raw or bare)
+        project_code = raw.upper() if raw.upper().endswith((".SH", ".SZ", ".BJ")) else bare + suffix
+        limit = min(max(int(days), 10), 250)
+        store = _market_store()
+
+        # Core index K-line comes from index_daily, which is the long-term index store.
+        index_candidates = {
+            bare,
+            project_code,
+            f"{bare}.SH",
+            f"{bare}.SZ",
+        }
         try:
-            df = _market_store().get_daily_bars(bare, days=min(max(int(days), 10), 250))
+            placeholders = ",".join("?" for _ in index_candidates)
+            rows = store._conn.execute(
+                f"""
+                SELECT code, trade_date, open, high, low, close, volume
+                FROM index_daily
+                WHERE code IN ({placeholders})
+                ORDER BY trade_date DESC
+                LIMIT ?
+                """,
+                (*index_candidates, limit),
+            ).fetchall()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("bars %s failed: %s", bare, exc)
-            return {"status": "error", "error": str(exc)[:200], "bars": []}
-        if df is None or df.empty:
-            return {"status": "ok", "code": bare, "bars": []}
-        cols = {c.lower(): c for c in df.columns}
-        out = []
-        for ts, row in df.iterrows():
-            out.append({
-                "date": pd.Timestamp(ts).strftime("%Y-%m-%d"),
-                "open": round(float(row[cols.get("open", "open")]), 3) if "open" in cols else None,
-                "close": round(float(row[cols.get("close", "close")]), 3) if "close" in cols else None,
-                "high": round(float(row[cols.get("high", "high")]), 3) if "high" in cols else None,
-                "low": round(float(row[cols.get("low", "low")]), 3) if "low" in cols else None,
-                "volume": float(row[cols.get("volume", "volume")]) if "volume" in cols else 0.0,
-            })
-        return {"status": "ok", "code": bare, "bars": out}
+            logger.warning("index bars %s failed: %s", raw, exc)
+            rows = []
+        if rows:
+            out = [
+                {
+                    "date": r["trade_date"],
+                    "open": round(float(r["open"] or 0), 3),
+                    "close": round(float(r["close"] or 0), 3),
+                    "high": round(float(r["high"] or 0), 3),
+                    "low": round(float(r["low"] or 0), 3),
+                    "volume": float(r["volume"] or 0),
+                }
+                for r in reversed(rows)
+            ]
+            return {"status": "ok", "code": rows[0]["code"], "bars": out}
+
+        # Stock K-line falls back to bars_daily. Try both suffix-normalized and bare
+        # forms for older local data.
+        for candidate in (project_code, bare):
+            try:
+                df = store.get_daily_bars(candidate, days=limit)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("bars %s failed: %s", candidate, exc)
+                continue
+            if df is not None and not df.empty:
+                cols = {c.lower(): c for c in df.columns}
+                out = []
+                for ts, row in df.iterrows():
+                    out.append({
+                        "date": pd.Timestamp(ts).strftime("%Y-%m-%d"),
+                        "open": round(float(row[cols.get("open", "open")]), 3) if "open" in cols else None,
+                        "close": round(float(row[cols.get("close", "close")]), 3) if "close" in cols else None,
+                        "high": round(float(row[cols.get("high", "high")]), 3) if "high" in cols else None,
+                        "low": round(float(row[cols.get("low", "low")]), 3) if "low" in cols else None,
+                        "volume": float(row[cols.get("volume", "volume")]) if "volume" in cols else 0.0,
+                    })
+                return {"status": "ok", "code": candidate, "bars": out}
+        return {"status": "ok", "code": project_code, "bars": []}

@@ -10,7 +10,6 @@ import type {
 import type { EChartsOption } from "echarts";
 import { cn } from "@/lib/utils";
 
-/** 8. 资金流证据 — 行业 TOP5 柱状 + 个股净流入/流出双榜 + 北向. */
 export function CapitalEvidence({ capital }: { capital: MarketCapital | null | undefined }) {
   if (!capital) return <EmptyHint>资金流数据暂不可用</EmptyHint>;
   return (
@@ -67,7 +66,6 @@ function StockFlow({ title, items, tone }: { title: string; items: CapitalStockI
   );
 }
 
-/** 9. 主线 & 观察板块. */
 export function MainThemes({ themes }: { themes: MarketThemes | null | undefined }) {
   if (!themes) return <EmptyHint>板块数据暂不可用</EmptyHint>;
   const mainLines = themes.main_lines ?? [];
@@ -100,7 +98,6 @@ export function MainThemes({ themes }: { themes: MarketThemes | null | undefined
   );
 }
 
-/** 10. 多周期涨幅榜. */
 export function MultiPeriodMovers({ rows }: { rows: MultiPeriodRow[] | undefined }) {
   if (!rows || !rows.length) return <EmptyHint>多周期涨幅榜暂不可用</EmptyHint>;
   const Cell = ({ v }: { v: number | null }) => (
@@ -136,7 +133,6 @@ export function MultiPeriodMovers({ rows }: { rows: MultiPeriodRow[] | undefined
   );
 }
 
-/** 11. 题材热力图 (treemap by concept-sector change_pct). */
 export function ThemeHeatmap({ themes }: { themes: MarketThemes | null | undefined }) {
   const sectors = themes?.concept_sectors ?? [];
   const option = useMemo((): EChartsOption => {

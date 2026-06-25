@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
-/** Dashboard panel shell — Tailwind card with optional title/icon/right slot. */
 export function Panel({
   title,
   icon,
@@ -18,12 +17,12 @@ export function Panel({
   children: ReactNode;
 }) {
   return (
-    <section className={cn("rounded-lg border bg-background", className)}>
+    <section className={cn("rounded-md border bg-background", className)}>
       {title && (
         <header className="flex items-center justify-between gap-2 border-b px-3 py-2">
-          <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+          <div className="flex min-w-0 items-center gap-1.5 text-xs font-medium text-foreground">
             {icon}
-            <span>{title}</span>
+            <span className="truncate">{title}</span>
           </div>
           {right}
         </header>
@@ -33,7 +32,6 @@ export function Panel({
   );
 }
 
-/** Empty/placeholder shown when a data source degraded (per-source fallback). */
 export function EmptyHint({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-[60px] items-center justify-center text-[11px] text-muted-foreground/70">
@@ -42,7 +40,6 @@ export function EmptyHint({ children }: { children: ReactNode }) {
   );
 }
 
-/** Colored pct text: red for up, green for down (A-share convention). */
 export function Pct({ value, className }: { value: number | null | undefined; className?: string }) {
   if (value === null || value === undefined || Number.isNaN(value)) {
     return <span className={cn("text-muted-foreground", className)}>-</span>;
@@ -52,7 +49,6 @@ export function Pct({ value, className }: { value: number | null | undefined; cl
   return <span className={cn(tone, className)}>{sign}{value.toFixed(2)}%</span>;
 }
 
-/** Format large CNY amounts (亿/万). */
 export function fmtYi(v: number | null | undefined): string {
   if (v === null || v === undefined || Number.isNaN(v)) return "-";
   const abs = Math.abs(v);
@@ -61,7 +57,6 @@ export function fmtYi(v: number | null | undefined): string {
   return v.toFixed(0);
 }
 
-/** Background tint by pct (for heatmap-like cells). */
 export function pctBg(value: number | null | undefined): string {
   if (value === null || value === undefined) return "transparent";
   if (value > 5) return "rgba(239,68,68,0.55)";

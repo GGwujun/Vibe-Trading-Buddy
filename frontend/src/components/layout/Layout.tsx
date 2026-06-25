@@ -1,6 +1,6 @@
 ﻿import { useEffect, useState } from "react";
 import { Link, Outlet, useLocation, useSearchParams } from "react-router-dom";
-import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Settings, Layers, Loader2, Target, Zap, Coins, User, CalendarClock, Ticket, Rss, Globe } from "lucide-react";
+import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Settings, Layers, Loader2, Target, Zap, Coins, User, CalendarClock, Ticket, Rss, Globe, Radar } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDarkMode } from "@/hooks/useDarkMode";
 import { api, type SessionItem } from "@/lib/api";
@@ -20,6 +20,7 @@ const NAV_GROUPS = [
     title: "工作台",
     items: [
       { to: "/", icon: BarChart3, label: "今日总览" },
+      { to: "/market-dashboard", icon: Radar, label: "AI 盘面" },
     ],
   },
   {
@@ -40,6 +41,10 @@ const NAV_GROUPS = [
   {
     title: "市场情报",
     items: [
+      { to: "/morning-brief", icon: CalendarClock, label: "早盘内参" },
+      { to: "/intraday-monitor", icon: Target, label: "盘中监控" },
+      { to: "/tail-strategy", icon: Zap, label: "尾盘策略" },
+      { to: "/close-review", icon: BarChart3, label: "收盘复盘" },
       { to: "/daily-recommendations", icon: Target, label: "今日推荐" },
       { to: "/recommendation-history", icon: BarChart3, label: "推荐历史" },
     ],

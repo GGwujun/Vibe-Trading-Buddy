@@ -6,6 +6,21 @@ import { isAdmin } from "@/lib/apiAuth";
 import { useAuthState } from "@/hooks/useAuthState";
 
 const Home = lazy(() => import("@/pages/Home").then((m) => ({ default: m.Home })));
+const MarketDashboard = lazy(() =>
+  import("@/pages/MarketDashboard").then((m) => ({ default: m.MarketDashboard })),
+);
+const MorningBrief = lazy(() =>
+  import("@/pages/MarketStagePage").then((m) => ({ default: m.MorningBrief })),
+);
+const IntradayMonitor = lazy(() =>
+  import("@/pages/MarketStagePage").then((m) => ({ default: m.IntradayMonitor })),
+);
+const TailStrategy = lazy(() =>
+  import("@/pages/MarketStagePage").then((m) => ({ default: m.TailStrategy })),
+);
+const CloseReview = lazy(() =>
+  import("@/pages/MarketStagePage").then((m) => ({ default: m.CloseReview })),
+);
 const Agent = lazy(() => import("@/pages/Agent").then((m) => ({ default: m.Agent })));
 const RunDetail = lazy(() =>
   import("@/pages/RunDetail").then((m) => ({ default: m.RunDetail })),
@@ -136,6 +151,11 @@ export const router = createBrowserRouter([
         element: <Layout />,
         children: [
           { path: "/", element: wrap(Home) },
+          { path: "/market-dashboard", element: wrap(MarketDashboard) },
+          { path: "/morning-brief", element: wrap(MorningBrief) },
+          { path: "/intraday-monitor", element: wrap(IntradayMonitor) },
+          { path: "/tail-strategy", element: wrap(TailStrategy) },
+          { path: "/close-review", element: wrap(CloseReview) },
           { path: "/agent", element: wrap(Agent) },
           { path: "/settings", element: wrap(Settings) },
           { path: "/runs/:runId", element: wrap(RunDetail) },

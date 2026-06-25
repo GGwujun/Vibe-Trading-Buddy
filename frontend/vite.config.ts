@@ -41,6 +41,11 @@ const SPA_WITH_API_PATHS = [
   "/news",
   "/opportunity",
   "/logic-chain",
+  "/market-dashboard",
+  "/morning-brief",
+  "/intraday-monitor",
+  "/tail-strategy",
+  "/close-review",
   "/tracking-dashboard",
   "/account"
 ];

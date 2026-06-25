@@ -4,7 +4,6 @@ import { Chart } from "./Chart";
 import { api, type MarketBarsResponse, type MarketPools, type TrackingWatchlistItem } from "@/lib/api";
 import type { EChartsOption } from "echarts";
 
-/** 4. 我的持仓 (uses tracking watchlist; latest price comes from elsewhere if available). */
 export function MyHoldings({
   watchlist,
   spotMap,
@@ -12,7 +11,7 @@ export function MyHoldings({
   watchlist: TrackingWatchlistItem[];
   spotMap: Map<string, { price?: number; change_pct?: number; name?: string }>;
 }) {
-  if (!watchlist.length) return <EmptyHint>暂无自选/持仓</EmptyHint>;
+  if (!watchlist.length) return <EmptyHint>暂无自选 / 持仓</EmptyHint>;
   return (
     <ul className="space-y-1">
       {watchlist.slice(0, 8).map((w) => {
@@ -35,20 +34,25 @@ export function MyHoldings({
   );
 }
 
-/** 5. 走势图 K线 (lightweight candlestick; default index, switchable). */
 export function KLinePanel({ codes }: { codes: { symbol: string; name: string }[] }) {
   const [sel, setSel] = useState(codes[0]?.symbol ?? "000001");
   const [resp, setResp] = useState<MarketBarsResponse | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    api.getMarketBars(sel, 60).then((r) => { if (!cancelled) setResp(r); }).catch(() => {});
+    setResp(null);
+    api.getMarketBars(sel, 60).then((r) => {
+      if (!cancelled) setResp(r);
+    }).catch(() => {
+      if (!cancelled) setResp({ status: "error", bars: [] } as MarketBarsResponse);
+    });
     return () => { cancelled = true; };
   }, [sel]);
 
   const option = useMemo((): EChartsOption => {
     const bars = resp?.bars ?? [];
-    const up = "#ef4444", down = "#22c55e";
+    const up = "#ef4444";
+    const down = "#22c55e";
     return {
       animation: false,
       grid: { left: 36, right: 12, top: 12, bottom: 48 },
@@ -68,7 +72,7 @@ export function KLinePanel({ codes }: { codes: { symbol: string; name: string }[
 
   return (
     <Panel
-      title="走势图（日K）"
+      title="走势 K 线"
       right={
         <select
           value={sel}
@@ -85,15 +89,14 @@ export function KLinePanel({ codes }: { codes: { symbol: string; name: string }[
       {resp && resp.bars.length ? (
         <Chart option={option} height={260} />
       ) : (
-        <EmptyHint>{resp ? "该标的暂无K线数据" : "加载中…"}</EmptyHint>
+        <EmptyHint>{resp ? "该标的暂无 K 线数据" : "加载中..."}</EmptyHint>
       )}
     </Panel>
   );
 }
 
-/** 6. 涨跌停情况 (real pool). */
 export function LimitBoard({ pools }: { pools: MarketPools | null | undefined }) {
-  if (!pools) return <EmptyHint>盘后/今日涨停池未同步</EmptyHint>;
+  if (!pools) return <EmptyHint>盘后/今日涨跌停池未同步</EmptyHint>;
   const limitUpList = pools.limit_up_list ?? [];
   return (
     <div className="space-y-2">
@@ -111,7 +114,7 @@ export function LimitBoard({ pools }: { pools: MarketPools | null | undefined })
         <div className="flex flex-wrap gap-1">
           {limitUpList.slice(0, 16).map((s) => (
             <span key={s.symbol} className="rounded bg-muted/60 px-1.5 py-0.5 text-[10px]">
-              {s.name}
+              {s.name || s.symbol}
               {s.days > 1 && <b className="ml-0.5 text-red-500">{s.days}板</b>}
             </span>
           ))}
@@ -121,7 +124,6 @@ export function LimitBoard({ pools }: { pools: MarketPools | null | undefined })
   );
 }
 
-/** 7. 连板梯队 (ladder: 5板 / 4板 / 3板 ...). */
 export function LimitLadder({ pools }: { pools: MarketPools | null | undefined }) {
   const ladder = pools?.limitup_ladder ?? [];
   if (!ladder.length) return <EmptyHint>连板梯队盘后同步</EmptyHint>;
@@ -140,7 +142,7 @@ export function LimitLadder({ pools }: { pools: MarketPools | null | undefined }
             </div>
           </div>
           <span className="hidden max-w-[40%] truncate text-muted-foreground sm:inline">
-            {rung.stocks.slice(0, 4).map((s) => s.name).join("、")}
+            {rung.stocks.slice(0, 4).map((s) => s.name || s.symbol).join("、")}
           </span>
         </div>
       ))}
