@@ -81,8 +81,8 @@ def main() -> int:
     ap.add_argument("--end", help="override end date (yyyy-MM-dd)")
     ap.add_argument("--codes", help="comma-separated codes (project form 600206.SH)")
     ap.add_argument("--max-codes", type=int, help="cap the code universe size")
-    ap.add_argument("--datasets", default="daily,dragon,pool,etf",
-                    help="comma-separated: daily,dragon,pool,etf,premium,capital")
+    ap.add_argument("--datasets", default="master,daily,dragon,pool,etf",
+                    help="comma-separated: master,daily,dragon,pool,etf,premium,capital")
     ap.add_argument("--universe", default="default", choices=["default", "all"])
     ap.add_argument("--lookback-days", type=int, default=None,
                     help="initial daily lookback when a code is cold; use 0 for today-only")
@@ -114,7 +114,7 @@ def main() -> int:
         codes = [c.strip() for c in args.codes.split(",") if c.strip()]
     elif "daily" in datasets:
         from src.data.market_sync import _all_a_share_codes
-        codes = _all_a_share_codes()
+        codes = _all_a_share_codes(store)
         if args.max_codes:
             codes = codes[: args.max_codes]
 
@@ -144,6 +144,11 @@ def main() -> int:
             lookback_days=args.lookback_days if args.lookback_days is not None else args.years * 365,
         )
         print(f"[daily] wrote {rows.get('daily', 0)} rows")
+
+    if "master" in datasets:
+        print("\n[master] syncing security master...")
+        rows = run_daily_sync(end, store=store, datasets={"master"}, deadline_seconds=3600)
+        print(f"[master] wrote {rows.get('master', 0)} rows")
 
     # Per-date snapshot datasets: walk calendar days.
     snap = datasets & {"dragon", "pool", "etf", "premium"}

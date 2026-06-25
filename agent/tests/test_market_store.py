@@ -55,6 +55,23 @@ def test_last_daily_date(store: MarketStore) -> None:
     assert store.last_daily_date("000000.SH") is None
 
 
+def test_security_master_default_universe_filters_risky_names(store: MarketStore) -> None:
+    n = store.upsert_security_master(
+        [
+            {"code": "000001.SZ", "symbol": "000001", "name": "平安银行", "list_status": "L", "list_date": "19910403"},
+            {"code": "000002.SZ", "symbol": "000002", "name": "ST测试", "list_status": "L", "is_st": True},
+            {"code": "000003.SZ", "symbol": "000003", "name": "退市测试", "list_status": "D", "is_delisting": True, "is_active": False},
+            {"code": "430001.BJ", "symbol": "430001", "name": "北交测试", "list_status": "L", "is_bj": True},
+        ]
+    )
+    assert n == 4
+    assert store.security_master_count() == 4
+    assert store.security_master_count(default_only=True) == 1
+    assert store.default_strategy_codes() == ["000001.SZ"]
+    lo, hi = store.date_range("security_master")
+    assert lo == "19910403" and hi == "19910403"
+
+
 def test_dragon_tiger_get_has(store: MarketStore) -> None:
     assert store.has_dragon_tiger("2026-06-11") is False
     store.upsert_dragon_tiger("2026-06-11", [{"code": "600206", "name": "X", "close": 10}])
@@ -79,7 +96,9 @@ def test_meta_round_trip(store: MarketStore) -> None:
 
 def test_table_counts_and_range(store: MarketStore) -> None:
     store.upsert_daily_bars("600206.SH", [_row("2026-06-10"), _row("2026-06-11")])
+    store.upsert_security_master([{"code": "600206.SH", "name": "X", "list_status": "L"}])
     counts = store.table_counts()
+    assert counts["security_master"] == 1
     assert counts["bars_daily"] == 2
     lo, hi = store.date_range("bars_daily")
     assert lo == "2026-06-10" and hi == "2026-06-11"

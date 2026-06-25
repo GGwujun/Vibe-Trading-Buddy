@@ -75,12 +75,136 @@ def _is_trading_day(date_str: str) -> bool:
             return False
 
 
-def _all_a_share_codes() -> list[str]:
+def _is_st_or_delisting_name(name: str) -> tuple[bool, bool]:
+    upper = str(name or "").upper()
+    is_st = "ST" in upper
+    is_delisting = "退" in str(name or "")
+    return is_st, is_delisting
+
+
+def _sync_security_master_tushare(store: MarketStore) -> int:
+    """Sync A-share security metadata via Tushare stock_basic."""
+    token = os.getenv("TUSHARE_TOKEN", "").strip()
+    if not token or token.lower() == "your-tushare-token":
+        return 0
+    try:
+        import pandas as pd
+        import tushare as ts
+    except Exception:  # noqa: BLE001
+        return 0
+
+    fields = (
+        "ts_code,symbol,name,area,industry,market,exchange,list_status,"
+        "list_date,delist_date,is_hs"
+    )
+    frames = []
+    try:
+        api = ts.pro_api(token)
+        for status in ("L", "P", "D"):
+            df = api.stock_basic(exchange="", list_status=status, fields=fields)
+            if df is not None and not df.empty:
+                frames.append(df)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("tushare stock_basic failed: %s", exc)
+        return 0
+    if not frames:
+        return 0
+
+    df = pd.concat(frames, ignore_index=True)
+    rows: list[dict] = []
+    for _, r in df.iterrows():
+        code = str(r.get("ts_code", "") or "").upper()
+        if not code:
+            continue
+        name = str(r.get("name", "") or "")
+        exchange = str(r.get("exchange", "") or "").upper()
+        list_status = str(r.get("list_status", "") or "L").upper()
+        is_st, name_delisting = _is_st_or_delisting_name(name)
+        rows.append(
+            {
+                "code": code,
+                "symbol": r.get("symbol"),
+                "name": name,
+                "area": r.get("area"),
+                "industry": r.get("industry"),
+                "market": r.get("market"),
+                "exchange": exchange,
+                "list_status": list_status,
+                "list_date": r.get("list_date"),
+                "delist_date": r.get("delist_date"),
+                "is_hs": r.get("is_hs"),
+                "is_st": is_st,
+                "is_delisting": name_delisting or list_status == "D",
+                "is_bj": exchange == "BSE" or code.endswith(".BJ"),
+                "is_active": list_status == "L",
+            }
+        )
+    written = store.upsert_security_master(rows)
+    if written:
+        logger.info("security master synced from tushare: %d rows", written)
+    return written
+
+
+def _sync_security_master_tpdog(store: MarketStore) -> int:
+    """Fallback active A-share security metadata via TPDog stocks/list."""
+    from src.data.tpdog_client import call
+
+    rows: list[dict] = []
+    for market, suffix, exchange in (("sh", ".SH", "SSE"), ("sz", ".SZ", "SZSE"), ("bj", ".BJ", "BSE")):
+        try:
+            content = call("stocks/list", type=market)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("stocks/list type=%s failed: %s", market, exc)
+            continue
+        for r in content:
+            code = str(r.get("code", "")).strip()
+            if len(code) != 6 or not code.isdigit():
+                continue
+            name = str(r.get("name", "") or "").strip()
+            is_st, is_delisting = _is_st_or_delisting_name(name)
+            rows.append(
+                {
+                    "code": code + suffix,
+                    "symbol": code,
+                    "name": name,
+                    "market": r.get("market") or market,
+                    "exchange": exchange,
+                    "list_status": "L",
+                    "is_st": is_st,
+                    "is_delisting": is_delisting,
+                    "is_bj": suffix == ".BJ",
+                    "is_active": True,
+                }
+            )
+    return store.upsert_security_master(rows)
+
+
+def _sync_security_master(store: MarketStore) -> int:
+    written = _sync_security_master_tushare(store)
+    if written:
+        return written
+    return _sync_security_master_tpdog(store)
+
+
+def _all_a_share_codes(store: MarketStore | None = None, *, default_only: bool = False) -> list[str]:
     """Return the full A-share code universe (sh + sz) from tpdog stocks/list.
 
     Codes are normalized to project form (``600206`` → ``600206.SH``). Returns
     [] on any failure (caller treats empty as "skip daily-K this tick").
     """
+    if store is not None:
+        try:
+            rows = store.list_security_master(default_only=default_only)
+            codes = [
+                r["code"]
+                for r in rows
+                if r.get("is_active") and not r.get("is_bj")
+            ]
+            if codes:
+                return codes
+        except Exception:  # noqa: BLE001
+            logger.debug("security_master code lookup failed", exc_info=True)
+
     from src.data.tpdog_client import call
 
     out: list[str] = []
@@ -360,8 +484,11 @@ def run_daily_sync(
         return {}
     today_str = _today_cst_str()
     deadline = time.monotonic() + deadline_seconds
-    datasets = datasets or {"daily", "dragon", "pool", "etf", "premium"}
+    datasets = datasets or {"master", "daily", "dragon", "pool", "etf", "premium"}
     result: dict[str, int] = {}
+
+    if "master" in datasets:
+        result["master"] = _sync_security_master(store)
 
     if "daily" in datasets:
         latest_settled = _latest_settled_date_for_sync(trade_date, today_str)
@@ -374,9 +501,9 @@ def run_daily_sync(
                 result["daily"] = written
                 universe_codes = []
             else:
-                universe_codes = codes if codes is not None else _all_a_share_codes()
+                universe_codes = codes if codes is not None else _all_a_share_codes(store)
         else:
-            universe_codes = codes if codes is not None else _all_a_share_codes()
+            universe_codes = codes if codes is not None else _all_a_share_codes(store)
         if universe_codes:
             written = 0
             for i, code in enumerate(universe_codes):

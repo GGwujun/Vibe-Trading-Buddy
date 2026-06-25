@@ -58,7 +58,7 @@ class SyncResultResponse(BaseModel):
 
 class BackfillRequest(BaseModel):
     years: int = 2
-    datasets: list[str] = ["daily", "dragon", "pool", "etf"]
+    datasets: list[str] = ["master", "daily", "dragon", "pool", "etf"]
     universe: str = "default"  # "default" | "all"
     etf_codes: Optional[list[str]] = None
     codes: Optional[list[str]] = None

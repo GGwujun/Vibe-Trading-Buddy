@@ -69,6 +69,24 @@ def daily_bars_batch(codes: list[str], days: int = 90) -> dict[str, pd.DataFrame
     return out
 
 
+def default_strategy_codes() -> list[str]:
+    """Return active A-share codes excluding ST/delisting/BJ by default."""
+    store = get_market_store()
+    if store is None:
+        logger.debug("market data service: store unavailable")
+        return []
+    return store.default_strategy_codes()
+
+
+def security_master(default_only: bool = False) -> list[dict]:
+    """Return local security metadata, optionally filtered to default universe."""
+    store = get_market_store()
+    if store is None:
+        logger.debug("market data service: store unavailable")
+        return []
+    return store.list_security_master(default_only=default_only)
+
+
 def missing_daily_dates(code: str, start: str, end: str) -> list[str]:
     """Return expected trading dates missing from local daily bars.
 

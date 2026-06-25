@@ -71,6 +71,27 @@ CREATE TABLE IF NOT EXISTS bars_daily (
 );
 CREATE INDEX IF NOT EXISTS idx_bars_daily_date ON bars_daily(trade_date);
 
+CREATE TABLE IF NOT EXISTS security_master (
+    code TEXT PRIMARY KEY,
+    symbol TEXT,
+    name TEXT,
+    area TEXT,
+    industry TEXT,
+    market TEXT,
+    exchange TEXT,
+    list_status TEXT,
+    list_date TEXT,
+    delist_date TEXT,
+    is_hs TEXT,
+    is_st INTEGER NOT NULL DEFAULT 0,
+    is_delisting INTEGER NOT NULL DEFAULT 0,
+    is_bj INTEGER NOT NULL DEFAULT 0,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_security_master_status ON security_master(list_status);
+CREATE INDEX IF NOT EXISTS idx_security_master_flags ON security_master(is_active, is_st, is_delisting, is_bj);
+
 CREATE TABLE IF NOT EXISTS etf_daily (
     code TEXT NOT NULL, trade_date TEXT NOT NULL,
     open REAL, high REAL, low REAL, close REAL,
@@ -281,6 +302,79 @@ class MarketStore:
     def codes_with_data(self) -> list[str]:
         rows = self._conn.execute(
             "SELECT DISTINCT code FROM bars_daily ORDER BY code"
+        ).fetchall()
+        return [r["code"] for r in rows]
+
+    # ------------------------------------------------------------------
+    # Security master / universes
+    # ------------------------------------------------------------------
+
+    @_synchronized
+    def upsert_security_master(self, rows: list[dict]) -> int:
+        """Upsert normalized A-share metadata rows."""
+        if not rows:
+            return 0
+        payload = []
+        for r in rows:
+            code = str(r.get("code") or r.get("ts_code") or "").upper()
+            if not code:
+                continue
+            payload.append(
+                (
+                    code,
+                    r.get("symbol"),
+                    r.get("name"),
+                    r.get("area"),
+                    r.get("industry"),
+                    r.get("market"),
+                    r.get("exchange"),
+                    r.get("list_status"),
+                    r.get("list_date"),
+                    r.get("delist_date"),
+                    r.get("is_hs"),
+                    1 if r.get("is_st") else 0,
+                    1 if r.get("is_delisting") else 0,
+                    1 if r.get("is_bj") else 0,
+                    1 if r.get("is_active", True) else 0,
+                    _now_iso(),
+                )
+            )
+        if not payload:
+            return 0
+        return self._executemany_chunked(
+            "INSERT OR REPLACE INTO security_master "
+            "(code, symbol, name, area, industry, market, exchange, list_status, "
+            "list_date, delist_date, is_hs, is_st, is_delisting, is_bj, is_active, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            payload,
+        )
+
+    @_synchronized
+    def security_master_count(self, *, default_only: bool = False) -> int:
+        sql = "SELECT COUNT(*) AS c FROM security_master"
+        if default_only:
+            sql += " WHERE is_active = 1 AND is_st = 0 AND is_delisting = 0 AND is_bj = 0"
+        row = self._conn.execute(sql).fetchone()
+        return int(row["c"]) if row else 0
+
+    @_synchronized
+    def list_security_master(self, *, default_only: bool = False) -> list[dict]:
+        sql = (
+            "SELECT code, symbol, name, area, industry, market, exchange, "
+            "list_status, list_date, delist_date, is_hs, is_st, is_delisting, is_bj, is_active "
+            "FROM security_master"
+        )
+        if default_only:
+            sql += " WHERE is_active = 1 AND is_st = 0 AND is_delisting = 0 AND is_bj = 0"
+        sql += " ORDER BY code"
+        return [dict(r) for r in self._conn.execute(sql).fetchall()]
+
+    @_synchronized
+    def default_strategy_codes(self) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT code FROM security_master "
+            "WHERE is_active = 1 AND is_st = 0 AND is_delisting = 0 AND is_bj = 0 "
+            "ORDER BY code"
         ).fetchall()
         return [r["code"] for r in rows]
 
@@ -529,7 +623,7 @@ class MarketStore:
     @_synchronized
     def table_counts(self) -> dict[str, int]:
         out: dict[str, int] = {}
-        for t in ("bars_daily", "etf_daily", "fund_premium_snapshot",
+        for t in ("security_master", "bars_daily", "etf_daily", "fund_premium_snapshot",
                   "dragon_tiger", "stock_capital_flow", "stock_pool"):
             row = self._conn.execute(f"SELECT COUNT(*) AS c FROM {t}").fetchone()
             out[t] = int(row["c"]) if row else 0
@@ -537,9 +631,16 @@ class MarketStore:
 
     @_synchronized
     def date_range(self, table: str) -> tuple[Optional[str], Optional[str]]:
-        if table not in {"bars_daily", "etf_daily", "fund_premium_snapshot",
+        if table not in {"security_master", "bars_daily", "etf_daily", "fund_premium_snapshot",
                          "dragon_tiger", "stock_capital_flow", "stock_pool"}:
             raise ValueError(f"unknown table: {table}")
+        if table == "security_master":
+            row = self._conn.execute(
+                "SELECT MIN(list_date) AS lo, MAX(list_date) AS hi FROM security_master"
+            ).fetchone()
+            if not row or not row["lo"]:
+                return (None, None)
+            return (row["lo"], row["hi"])
         row = self._conn.execute(
             f"SELECT MIN(trade_date) AS lo, MAX(trade_date) AS hi FROM {table}"
         ).fetchone()

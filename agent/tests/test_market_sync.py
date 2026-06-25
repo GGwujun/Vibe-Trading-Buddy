@@ -112,6 +112,28 @@ def test_daily_uses_tushare_bulk_before_per_code_fallback(store: MarketStore) ->
     assert m_fetch.call_count == 0
 
 
+def test_security_master_tpdog_fallback_marks_default_universe(store: MarketStore) -> None:
+    def fake_call(path: str, **params):
+        assert path == "stocks/list"
+        if params["type"] == "sh":
+            return [{"code": "600000", "name": "浦发银行"}, {"code": "600001", "name": "ST样本"}]
+        if params["type"] == "sz":
+            return [{"code": "000001", "name": "平安银行"}]
+        if params["type"] == "bj":
+            return [{"code": "430001", "name": "北交样本"}]
+        return []
+
+    with mock.patch.dict("os.environ", {"TUSHARE_TOKEN": ""}), \
+         mock.patch("src.data.tpdog_client.call", side_effect=fake_call):
+        written = ms._sync_security_master(store)
+
+    assert written == 4
+    assert store.security_master_count() == 4
+    # Daily backfill can still use ST non-BJ names, but strategy default excludes ST and BJ.
+    assert ms._all_a_share_codes(store) == ["000001.SZ", "600000.SH", "600001.SH"]
+    assert store.default_strategy_codes() == ["000001.SZ", "600000.SH"]
+
+
 def test_single_dataset_failure_does_not_block_siblings(store: MarketStore) -> None:
     with mock.patch.object(ms, "_sync_dragon_tiger", side_effect=RuntimeError("boom")), \
          mock.patch.object(ms, "_sync_pools", return_value=5):
