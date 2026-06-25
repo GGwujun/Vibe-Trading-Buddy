@@ -144,6 +144,9 @@ def main() -> int:
     ap.add_argument("--universe", default="default", choices=["default", "all"])
     ap.add_argument("--lookback-days", type=int, default=None,
                     help="initial daily lookback when a code is cold; use 0 for today-only")
+    ap.add_argument("--etf-codes", help="comma-separated ETF codes for etf sync, e.g. 510300,159919")
+    ap.add_argument("--max-etf-codes", type=int,
+                    help="cap ETF sync to the first N missing ETF codes for the end date")
     ap.add_argument("--plan-only", action="store_true", help="print local coverage/backfill plan and exit")
     ap.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     args = ap.parse_args()
@@ -233,12 +236,19 @@ def main() -> int:
             print(f"[daily] wrote {rows.get('daily', 0)} rows")
 
     # Per-date snapshot datasets: walk calendar days.
-    snap = datasets & {"dragon", "pool", "etf", "premium"}
+    snap = datasets & {"dragon", "pool", "etf", "premium", "capital"}
     if snap:
         print(f"\n[snapshots] walking {dates_n} dates for {sorted(snap)}...")
+        etf_codes = None
+        if "etf" in snap:
+            if args.etf_codes:
+                etf_codes = [c.strip() for c in args.etf_codes.split(",") if c.strip()]
+            elif args.max_etf_codes:
+                etf_codes = store.missing_etf_daily_codes(end, limit=args.max_etf_codes)
+                print(f"[etf] syncing {len(etf_codes)} missing ETF codes for {end}")
         for d in _trading_dates(start, end):
             try:
-                run_daily_sync(d, store=store, datasets=snap, deadline_seconds=3600)
+                run_daily_sync(d, store=store, datasets=snap, etf_codes=etf_codes, deadline_seconds=3600)
             except Exception as exc:  # noqa: BLE001
                 print(f"  {d}: {exc}", file=sys.stderr)
         print("[snapshots] done")

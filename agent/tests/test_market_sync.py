@@ -201,6 +201,92 @@ def test_security_master_tushare_uses_single_active_call(store: MarketStore) -> 
     assert row["list_date"] == "19910403"
 
 
+def test_etf_daily_uses_tushare_bulk_when_codes_omitted(store: MarketStore) -> None:
+    class FakeApi:
+        def fund_daily(self, **kwargs):
+            assert kwargs == {"trade_date": "20260624"}
+            import pandas as pd
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "510300.SH",
+                        "open": 4.0,
+                        "high": 4.1,
+                        "low": 3.9,
+                        "close": 4.05,
+                        "vol": 100,
+                        "amount": 400,
+                        "pct_chg": 1.2,
+                    }
+                ]
+            )
+
+    with mock.patch.dict("os.environ", {"TUSHARE_TOKEN": "token"}), \
+         mock.patch("tushare.pro_api", return_value=FakeApi()), \
+         mock.patch.object(ms, "_today_cst_str", return_value="2026-06-25"):
+        res = ms.run_daily_sync("2026-06-24", store=store, datasets={"etf"})
+
+    assert res["etf"] == 1
+    df = store.get_etf_daily("510300.SH", start="2026-06-24", end="2026-06-24")
+    assert df is not None
+    assert float(df["close"].iloc[0]) == 4.05
+
+
+def test_etf_daily_falls_back_to_snapshot_codes(store: MarketStore) -> None:
+    store.upsert_fund_premium("2026-06-24", [{"code": "510300", "type": "ETF"}])
+
+    def fake_call(path: str, **params):
+        assert path == "etf_his/daily"
+        assert params["code"] == "etf.510300"
+        return [
+            {"date": "2026-06-24", "open": 4, "high": 4.1, "low": 3.9, "close": 4.05, "volume": 100}
+        ]
+
+    with mock.patch.dict("os.environ", {"TUSHARE_TOKEN": ""}), \
+         mock.patch("src.data.tpdog_client.call", side_effect=fake_call), \
+         mock.patch.object(ms, "_today_cst_str", return_value="2026-06-25"):
+        res = ms.run_daily_sync("2026-06-24", store=store, datasets={"etf"})
+
+    assert res["etf"] == 1
+    df = store.get_etf_daily("510300", start="2026-06-24", end="2026-06-24")
+    assert df is not None
+    assert float(df["close"].iloc[0]) == 4.05
+
+
+def test_capital_uses_tushare_moneyflow(store: MarketStore) -> None:
+    class FakeApi:
+        def moneyflow(self, **kwargs):
+            assert kwargs == {"trade_date": "20260624"}
+            import pandas as pd
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "buy_sm_amount": 10,
+                        "sell_sm_amount": 4,
+                        "buy_lg_amount": 20,
+                        "sell_lg_amount": 8,
+                        "buy_elg_amount": 30,
+                        "sell_elg_amount": 12,
+                        "net_mf_vol": 100,
+                        "net_mf_amount": 30,
+                    }
+                ]
+            )
+
+    with mock.patch.dict("os.environ", {"TUSHARE_TOKEN": "token"}), \
+         mock.patch("tushare.pro_api", return_value=FakeApi()):
+        res = ms.run_daily_sync("2026-06-24", store=store, datasets={"capital"})
+
+    assert res["capital"] == 1
+    rows = store.get_stock_capital("000001.SZ", start="2026-06-24", end="2026-06-24")
+    assert len(rows) == 1
+    assert rows[0]["m_in"] == 50
+    assert rows[0]["m_out"] == 20
+    assert rows[0]["m_net"] == 30
+    assert rows[0]["r_net"] == 6
+
+
 def test_single_dataset_failure_does_not_block_siblings(store: MarketStore) -> None:
     with mock.patch.object(ms, "_sync_dragon_tiger", side_effect=RuntimeError("boom")), \
          mock.patch.object(ms, "_sync_pools", return_value=5):

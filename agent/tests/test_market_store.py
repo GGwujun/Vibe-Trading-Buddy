@@ -123,3 +123,35 @@ def test_market_coverage_and_missing_daily_codes(store: MarketStore) -> None:
     assert cov["daily_default_missing_codes"] == 1
     assert cov["date_ranges"]["bars_daily"] == ["2026-06-10", "2026-06-10"]
     assert store.missing_daily_codes() == ["000002.SZ"]
+
+
+def test_fund_snapshot_codes_filters_type(store: MarketStore) -> None:
+    store.upsert_fund_premium(
+        "2026-06-24",
+        [
+            {"code": "510300", "type": "ETF"},
+            {"code": "160105", "type": "LOF"},
+            {"code": "159919", "type": "ETF"},
+        ],
+    )
+    assert store.fund_snapshot_codes(fund_type="ETF") == ["159919", "510300"]
+    assert store.fund_snapshot_codes() == ["159919", "160105", "510300"]
+
+
+def test_has_etf_daily(store: MarketStore) -> None:
+    assert store.has_etf_daily("510300", "2026-06-24") is False
+    store.upsert_etf_daily("510300", [{"date": "2026-06-24", "close": 4.05}])
+    assert store.has_etf_daily("510300", "2026-06-24") is True
+
+
+def test_missing_etf_daily_codes(store: MarketStore) -> None:
+    store.upsert_fund_premium(
+        "2026-06-24",
+        [
+            {"code": "510300", "type": "ETF"},
+            {"code": "159919", "type": "ETF"},
+            {"code": "160105", "type": "LOF"},
+        ],
+    )
+    store.upsert_etf_daily("510300", [{"date": "2026-06-24", "close": 4.05}])
+    assert store.missing_etf_daily_codes("2026-06-24") == ["159919"]

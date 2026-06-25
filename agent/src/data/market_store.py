@@ -503,6 +503,14 @@ class MarketStore:
         df["date"] = pd.to_datetime(df["date"])
         return df.set_index("date").sort_index()
 
+    @_synchronized
+    def has_etf_daily(self, code: str, trade_date: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM etf_daily WHERE code = ? AND trade_date = ? LIMIT 1",
+            (code, trade_date),
+        ).fetchone()
+        return row is not None
+
     # ------------------------------------------------------------------
     # Dragon-tiger list
     # ------------------------------------------------------------------
@@ -667,6 +675,32 @@ class MarketStore:
             (trade_date,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    @_synchronized
+    def fund_snapshot_codes(self, *, fund_type: str | None = None) -> list[str]:
+        sql = "SELECT DISTINCT code FROM fund_premium_snapshot"
+        params: list[Any] = []
+        if fund_type:
+            sql += " WHERE UPPER(type) = ?"
+            params.append(fund_type.upper())
+        sql += " ORDER BY code"
+        rows = self._conn.execute(sql, params).fetchall()
+        return [r["code"] for r in rows if r["code"]]
+
+    @_synchronized
+    def missing_etf_daily_codes(self, trade_date: str, *, limit: int | None = None) -> list[str]:
+        sql = (
+            "SELECT DISTINCT f.code FROM fund_premium_snapshot f "
+            "LEFT JOIN etf_daily e ON e.code = f.code AND e.trade_date = ? "
+            "WHERE UPPER(f.type) = 'ETF' AND e.code IS NULL "
+            "ORDER BY f.code"
+        )
+        params: list[Any] = [trade_date]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        rows = self._conn.execute(sql, params).fetchall()
+        return [r["code"] for r in rows if r["code"]]
 
     # ------------------------------------------------------------------
     # sync_meta

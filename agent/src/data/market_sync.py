@@ -240,6 +240,13 @@ def _to_tpdog_code(code: str) -> str | None:
     return None
 
 
+def _num(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # ----------------------------------------------------------------------
 # Per-dataset sync
 # ----------------------------------------------------------------------
@@ -417,11 +424,65 @@ def _sync_pools(store: MarketStore, trade_date: str) -> int:
     return total
 
 
+def _sync_etf_daily_tushare_by_date(
+    store: MarketStore,
+    trade_date: str,
+    *,
+    etf_codes: Optional[list[str]] = None,
+) -> int:
+    """Fetch one settled ETF date in bulk via Tushare ``fund_daily``."""
+    token = os.getenv("TUSHARE_TOKEN", "").strip()
+    if not token or token.lower() == "your-tushare-token":
+        return 0
+    try:
+        import tushare as ts
+    except Exception:  # noqa: BLE001
+        logger.debug("tushare package unavailable; ETF daily bulk skipped")
+        return 0
+
+    wanted = {c.upper() for c in etf_codes} if etf_codes else None
+    try:
+        api = ts.pro_api(token)
+        df = api.fund_daily(trade_date=trade_date.replace("-", ""))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("tushare ETF daily bulk failed for %s: %s", trade_date, exc)
+        return 0
+    if df is None or df.empty:
+        return 0
+
+    grouped: dict[str, list[dict]] = {}
+    for _, r in df.iterrows():
+        code = str(r.get("ts_code", "")).upper()
+        if not code or (wanted is not None and code not in wanted):
+            continue
+        grouped.setdefault(code, []).append(
+            {
+                "date": trade_date,
+                "open": r.get("open"),
+                "high": r.get("high"),
+                "low": r.get("low"),
+                "close": r.get("close"),
+                "volume": r.get("vol"),
+                "total_amt": r.get("amount"),
+                "rise": r.get("pct_chg"),
+            }
+        )
+
+    written = 0
+    for code, rows in grouped.items():
+        written += store.upsert_etf_daily(code, rows)
+    if written:
+        logger.info("tushare ETF daily bulk wrote %d rows for %s", written, trade_date)
+    return written
+
+
 def _sync_etf_daily(store: MarketStore, etf_codes: list[str], trade_date: str, today_str: str) -> int:
     from src.data.tpdog_client import call
 
     total = 0
     for code in etf_codes:
+        if store.has_etf_daily(code, trade_date):
+            continue
         try:
             rows = call("etf_his/daily", code=f"etf.{code}", start=trade_date, end=trade_date)
         except Exception as exc:  # noqa: BLE001
@@ -432,7 +493,65 @@ def _sync_etf_daily(store: MarketStore, etf_codes: list[str], trade_date: str, t
         rows = [r for r in rows if latest_settled and r.get("date") and r["date"] <= latest_settled]
         if rows:
             total += store.upsert_etf_daily(code, rows)
+        if total and total % 50 == 0:
+            logger.info("ETF daily sync %s: wrote %d rows", trade_date, total)
     return total
+
+
+def _sync_stock_capital_tushare_by_date(store: MarketStore, trade_date: str) -> int:
+    """Fetch one settled stock money-flow date in bulk via Tushare ``moneyflow``."""
+    token = os.getenv("TUSHARE_TOKEN", "").strip()
+    if not token or token.lower() == "your-tushare-token":
+        return 0
+    try:
+        import tushare as ts
+    except Exception:  # noqa: BLE001
+        logger.debug("tushare package unavailable; moneyflow skipped")
+        return 0
+
+    try:
+        api = ts.pro_api(token)
+        df = api.moneyflow(trade_date=trade_date.replace("-", ""))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("tushare moneyflow failed for %s: %s", trade_date, exc)
+        return 0
+    if df is None or df.empty:
+        return 0
+
+    written = 0
+    for _, r in df.iterrows():
+        code = str(r.get("ts_code", "")).upper()
+        if not code:
+            continue
+        buy_lg = _num(r.get("buy_lg_amount"))
+        buy_elg = _num(r.get("buy_elg_amount"))
+        sell_lg = _num(r.get("sell_lg_amount"))
+        sell_elg = _num(r.get("sell_elg_amount"))
+        buy_sm = _num(r.get("buy_sm_amount"))
+        sell_sm = _num(r.get("sell_sm_amount"))
+        row = {
+            "date": trade_date,
+            "m_in": buy_lg + buy_elg,
+            "m_out": sell_lg + sell_elg,
+            "m_net": r.get("net_mf_amount"),
+            "r_in": buy_sm,
+            "r_out": sell_sm,
+            "r_net": buy_sm - sell_sm,
+            "buy_sm_amount": r.get("buy_sm_amount"),
+            "sell_sm_amount": r.get("sell_sm_amount"),
+            "buy_md_amount": r.get("buy_md_amount"),
+            "sell_md_amount": r.get("sell_md_amount"),
+            "buy_lg_amount": r.get("buy_lg_amount"),
+            "sell_lg_amount": r.get("sell_lg_amount"),
+            "buy_elg_amount": r.get("buy_elg_amount"),
+            "sell_elg_amount": r.get("sell_elg_amount"),
+            "net_mf_vol": r.get("net_mf_vol"),
+            "net_mf_amount": r.get("net_mf_amount"),
+        }
+        written += store.upsert_stock_capital(code, trade_date, 1, [row])
+    if written:
+        logger.info("tushare moneyflow wrote %d rows for %s", written, trade_date)
+    return written
 
 
 def _sync_fund_premium_snapshot(store: MarketStore, trade_date: str) -> int:
@@ -544,8 +663,26 @@ def run_daily_sync(
 
     _run("dragon", lambda: _sync_dragon_tiger(store, trade_date))
     _run("pool", lambda: _sync_pools(store, trade_date))
-    if etf_codes:
-        _run("etf", lambda: _sync_etf_daily(store, etf_codes, trade_date, today_str))
+
+    def _run_etf() -> int:
+        latest_settled = _latest_settled_date_for_sync(trade_date, today_str)
+        if latest_settled != trade_date:
+            return 0
+        resolved_etf_codes = etf_codes
+        if resolved_etf_codes is None:
+            try:
+                resolved_etf_codes = store.fund_snapshot_codes(fund_type="ETF")
+                if not resolved_etf_codes:
+                    resolved_etf_codes = None
+            except Exception:  # noqa: BLE001
+                resolved_etf_codes = None
+        written = _sync_etf_daily_tushare_by_date(store, trade_date, etf_codes=resolved_etf_codes)
+        if written or not resolved_etf_codes:
+            return written
+        return _sync_etf_daily(store, resolved_etf_codes, trade_date, today_str)
+
+    _run("etf", _run_etf)
+    _run("capital", lambda: _sync_stock_capital_tushare_by_date(store, trade_date))
     _run("premium", lambda: _sync_fund_premium_snapshot(store, trade_date))
 
     return result
