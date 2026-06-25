@@ -378,6 +378,77 @@ class MarketStore:
         ).fetchall()
         return [r["code"] for r in rows]
 
+    @_synchronized
+    def market_coverage(self) -> dict[str, Any]:
+        """Return high-level local-data coverage for operator/status views."""
+        scalar_sql = {
+            "security_total": "SELECT COUNT(*) FROM security_master",
+            "security_active": "SELECT COUNT(*) FROM security_master WHERE is_active = 1",
+            "security_default": (
+                "SELECT COUNT(*) FROM security_master "
+                "WHERE is_active = 1 AND is_st = 0 AND is_delisting = 0 AND is_bj = 0"
+            ),
+            "security_st_active": (
+                "SELECT COUNT(*) FROM security_master WHERE is_active = 1 AND is_st = 1"
+            ),
+            "security_bj_active": (
+                "SELECT COUNT(*) FROM security_master WHERE is_active = 1 AND is_bj = 1"
+            ),
+            "security_delisting": "SELECT COUNT(*) FROM security_master WHERE is_delisting = 1",
+            "daily_rows": "SELECT COUNT(*) FROM bars_daily",
+            "daily_codes": "SELECT COUNT(DISTINCT code) FROM bars_daily",
+            "daily_default_codes": (
+                "SELECT COUNT(DISTINCT b.code) FROM bars_daily b "
+                "JOIN security_master s ON s.code = b.code "
+                "WHERE s.is_active = 1 AND s.is_st = 0 AND s.is_delisting = 0 AND s.is_bj = 0"
+            ),
+            "fund_premium_rows": "SELECT COUNT(*) FROM fund_premium_snapshot",
+            "fund_premium_codes": "SELECT COUNT(DISTINCT code) FROM fund_premium_snapshot",
+            "etf_daily_rows": "SELECT COUNT(*) FROM etf_daily",
+            "etf_daily_codes": "SELECT COUNT(DISTINCT code) FROM etf_daily",
+            "dragon_tiger_rows": "SELECT COUNT(*) FROM dragon_tiger",
+            "stock_capital_flow_rows": "SELECT COUNT(*) FROM stock_capital_flow",
+            "stock_pool_rows": "SELECT COUNT(*) FROM stock_pool",
+        }
+        out: dict[str, Any] = {}
+        for key, sql in scalar_sql.items():
+            row = self._conn.execute(sql).fetchone()
+            out[key] = int(row[0]) if row and row[0] is not None else 0
+        out["daily_default_missing_codes"] = max(
+            0, out["security_default"] - out["daily_default_codes"]
+        )
+        ranges: dict[str, list[str | None]] = {}
+        for table in (
+            "security_master",
+            "bars_daily",
+            "etf_daily",
+            "fund_premium_snapshot",
+            "dragon_tiger",
+            "stock_capital_flow",
+            "stock_pool",
+        ):
+            ranges[table] = list(self.date_range(table))
+        out["date_ranges"] = ranges
+        return out
+
+    @_synchronized
+    def missing_daily_codes(self, *, default_only: bool = True, limit: int = 100) -> list[str]:
+        """Return strategy/universe codes that have no local daily bars yet."""
+        where = ""
+        if default_only:
+            where = "WHERE s.is_active = 1 AND s.is_st = 0 AND s.is_delisting = 0 AND s.is_bj = 0"
+        rows = self._conn.execute(
+            "SELECT s.code FROM security_master s "
+            "LEFT JOIN bars_daily b ON b.code = s.code "
+            f"{where} "
+            "GROUP BY s.code "
+            "HAVING COUNT(b.trade_date) = 0 "
+            "ORDER BY s.code "
+            "LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        return [r["code"] for r in rows]
+
     # ------------------------------------------------------------------
     # ETF daily (etf_daily)
     # ------------------------------------------------------------------

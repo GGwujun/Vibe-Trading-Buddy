@@ -102,3 +102,24 @@ def test_table_counts_and_range(store: MarketStore) -> None:
     assert counts["bars_daily"] == 2
     lo, hi = store.date_range("bars_daily")
     assert lo == "2026-06-10" and hi == "2026-06-11"
+
+
+def test_market_coverage_and_missing_daily_codes(store: MarketStore) -> None:
+    store.upsert_security_master(
+        [
+            {"code": "000001.SZ", "symbol": "000001", "name": "A", "list_status": "L"},
+            {"code": "000002.SZ", "symbol": "000002", "name": "B", "list_status": "L"},
+            {"code": "000003.SZ", "symbol": "000003", "name": "ST B", "list_status": "L", "is_st": True},
+            {"code": "430001.BJ", "symbol": "430001", "name": "BJ", "list_status": "L", "is_bj": True},
+        ]
+    )
+    store.upsert_daily_bars("000001.SZ", [_row("2026-06-10")])
+
+    cov = store.market_coverage()
+    assert cov["security_total"] == 4
+    assert cov["security_default"] == 2
+    assert cov["daily_codes"] == 1
+    assert cov["daily_default_codes"] == 1
+    assert cov["daily_default_missing_codes"] == 1
+    assert cov["date_ranges"]["bars_daily"] == ["2026-06-10", "2026-06-10"]
+    assert store.missing_daily_codes() == ["000002.SZ"]

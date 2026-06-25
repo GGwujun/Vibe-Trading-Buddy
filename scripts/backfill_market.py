@@ -74,6 +74,64 @@ def _estimate_credits(codes_n: int, dates_n: int, datasets: set[str], years: int
     return est
 
 
+def _resolve_daily_codes(store, args, datasets: set[str]) -> list[str] | None:
+    if args.codes:
+        codes = [c.strip().upper() for c in args.codes.split(",") if c.strip()]
+    elif "daily" in datasets:
+        if args.universe == "default":
+            codes = store.default_strategy_codes()
+        else:
+            from src.data.market_sync import _all_a_share_codes
+            codes = _all_a_share_codes(store, default_only=False)
+    else:
+        return None
+    if args.max_codes:
+        codes = codes[: args.max_codes]
+    return codes
+
+
+def _print_coverage(store) -> None:
+    cov = store.market_coverage()
+    ranges = cov.get("date_ranges", {})
+    print("\nLocal coverage:")
+    print(
+        "  securities : "
+        f"total={cov['security_total']}, active={cov['security_active']}, "
+        f"default={cov['security_default']}, st_active={cov['security_st_active']}, "
+        f"bj_active={cov['security_bj_active']}, delisting={cov['security_delisting']}"
+    )
+    print(
+        "  daily      : "
+        f"rows={cov['daily_rows']}, codes={cov['daily_codes']}, "
+        f"default_codes={cov['daily_default_codes']}, "
+        f"default_missing={cov['daily_default_missing_codes']}, "
+        f"range={ranges.get('bars_daily')}"
+    )
+    print(
+        "  premium    : "
+        f"rows={cov['fund_premium_rows']}, codes={cov['fund_premium_codes']}, "
+        f"range={ranges.get('fund_premium_snapshot')}"
+    )
+    print(
+        "  extras     : "
+        f"etf_daily={cov['etf_daily_rows']}, dragon_tiger={cov['dragon_tiger_rows']}, "
+        f"capital_flow={cov['stock_capital_flow_rows']}, stock_pool={cov['stock_pool_rows']}"
+    )
+
+
+def _tushare_daily_available() -> bool:
+    import os
+
+    token = os.getenv("TUSHARE_TOKEN", "").strip()
+    if not token or token.lower() == "your-tushare-token":
+        return False
+    try:
+        import tushare  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Backfill market data into SQLite.")
     ap.add_argument("--years", type=int, default=2, help="daily/etf lookback years")
@@ -86,6 +144,7 @@ def main() -> int:
     ap.add_argument("--universe", default="default", choices=["default", "all"])
     ap.add_argument("--lookback-days", type=int, default=None,
                     help="initial daily lookback when a code is cold; use 0 for today-only")
+    ap.add_argument("--plan-only", action="store_true", help="print local coverage/backfill plan and exit")
     ap.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     args = ap.parse_args()
 
@@ -108,25 +167,30 @@ def main() -> int:
     else:
         start = (datetime.now() - timedelta(days=args.years * 365)).strftime("%Y-%m-%d")
 
-    # Resolve code universe.
-    codes = None
-    if args.codes:
-        codes = [c.strip() for c in args.codes.split(",") if c.strip()]
-    elif "daily" in datasets:
-        from src.data.market_sync import _all_a_share_codes
-        codes = _all_a_share_codes(store)
-        if args.max_codes:
-            codes = codes[: args.max_codes]
-
     dates_n = len(_trading_dates(start, end))
-    codes_n = len(codes) if codes else (5000 if "daily" in datasets else 0)
+    current_codes = _resolve_daily_codes(store, args, datasets)
+    codes_n = len(current_codes) if current_codes else (5000 if "daily" in datasets else 0)
     est = _estimate_credits(codes_n, dates_n, datasets, args.years)
 
+    _print_coverage(store)
     print(f"Backfill plan:")
     print(f"  window      : {start} .. {end} ({dates_n} calendar days)")
     print(f"  datasets    : {sorted(datasets)}")
+    print(f"  universe    : {args.universe}")
     print(f"  daily codes : {codes_n}")
-    print(f"  est credits : ~{est:,}  (daily dominates)")
+    daily_mode = None
+    if "daily" in datasets:
+        daily_mode = "tushare-date-bulk" if _tushare_daily_available() and not args.codes else "tpdog-code-range"
+        print(f"  daily mode  : {daily_mode}")
+    if daily_mode == "tushare-date-bulk":
+        print(f"  est calls   : ~{dates_n:,} Tushare daily calls before holiday filtering")
+    else:
+        print(f"  est credits : ~{est:,}  (daily dominates)")
+    if args.plan_only:
+        missing = store.missing_daily_codes(default_only=(args.universe == "default"), limit=20)
+        if missing:
+            print(f"  missing sample: {', '.join(missing)}")
+        return 0
     if not args.yes:
         try:
             input("\nProceed? [Enter] to confirm, Ctrl-C to abort ... ")
@@ -134,21 +198,39 @@ def main() -> int:
             print("\naborted.")
             return 130
 
-    # Drive daily sync once (run_daily_sync walks the code universe + slices
-    # the full window internally, resuming from last_daily_date per code).
-    if "daily" in datasets:
-        print("\n[daily] syncing (resumable; this is the long part)...")
-        rows = run_daily_sync(
-            end, store=store, codes=codes, datasets={"daily"},
-            deadline_seconds=86400,
-            lookback_days=args.lookback_days if args.lookback_days is not None else args.years * 365,
-        )
-        print(f"[daily] wrote {rows.get('daily', 0)} rows")
-
     if "master" in datasets:
         print("\n[master] syncing security master...")
         rows = run_daily_sync(end, store=store, datasets={"master"}, deadline_seconds=3600)
         print(f"[master] wrote {rows.get('master', 0)} rows")
+
+    # Resolve the code universe after master sync so a fresh DB can populate
+    # security_master first, then derive the backfill universe from it.
+    codes = _resolve_daily_codes(store, args, datasets)
+
+    # Drive daily sync once (run_daily_sync walks the code universe + slices
+    # the full window internally in TPDog fallback mode. With Tushare, daily is
+    # cheap in the opposite shape: one whole-market call per trade date.
+    if "daily" in datasets:
+        print("\n[daily] syncing (resumable; this is the long part)...")
+        if _tushare_daily_available() and not args.codes:
+            total = 0
+            for i, d in enumerate(_trading_dates(start, end), start=1):
+                rows = run_daily_sync(
+                    d, store=store, codes=codes, datasets={"daily"}, universe=args.universe,
+                    deadline_seconds=3600,
+                    lookback_days=0,
+                )
+                total += rows.get("daily", 0)
+                if i % 30 == 0:
+                    print(f"  {i}/{dates_n} dates, wrote {total} rows")
+            print(f"[daily] wrote {total} rows")
+        else:
+            rows = run_daily_sync(
+                end, store=store, codes=codes, datasets={"daily"}, universe=args.universe,
+                deadline_seconds=86400,
+                lookback_days=args.lookback_days if args.lookback_days is not None else args.years * 365,
+            )
+            print(f"[daily] wrote {rows.get('daily', 0)} rows")
 
     # Per-date snapshot datasets: walk calendar days.
     snap = datasets & {"dragon", "pool", "etf", "premium"}
@@ -163,6 +245,7 @@ def main() -> int:
 
     counts = store.table_counts()
     print(f"\nFinal table counts: {counts}")
+    _print_coverage(store)
     return 0
 
 

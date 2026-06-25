@@ -496,14 +496,23 @@ def run_daily_sync(
             result["daily"] = 0
             universe_codes = []
         elif latest_settled == trade_date:
-            written = _sync_daily_tushare_by_date(store, trade_date, codes=codes)
+            daily_codes = (
+                codes if codes is not None else _all_a_share_codes(
+                    store, default_only=(universe == "default")
+                )
+            )
+            written = _sync_daily_tushare_by_date(store, trade_date, codes=daily_codes)
             if written:
                 result["daily"] = written
                 universe_codes = []
             else:
-                universe_codes = codes if codes is not None else _all_a_share_codes(store)
+                universe_codes = daily_codes
         else:
-            universe_codes = codes if codes is not None else _all_a_share_codes(store)
+            universe_codes = (
+                codes if codes is not None else _all_a_share_codes(
+                    store, default_only=(universe == "default")
+                )
+            )
         if universe_codes:
             written = 0
             for i, code in enumerate(universe_codes):

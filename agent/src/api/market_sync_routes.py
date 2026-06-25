@@ -40,6 +40,7 @@ class StatusResponse(BaseModel):
     last_synced: dict[str, str]  # date → iso ts, from sync_meta daemon:* keys
     tables: dict[str, int]
     date_ranges: dict[str, list[str | None]]
+    coverage: dict[str, Any] = {}
 
 
 class DailySyncRequest(BaseModel):
@@ -131,6 +132,7 @@ async def status() -> StatusResponse:
         last_synced=_latest_synced(),
         tables=counts,
         date_ranges=ranges,
+        coverage=store.market_coverage(),
     )
 
 

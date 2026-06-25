@@ -112,6 +112,28 @@ def test_daily_uses_tushare_bulk_before_per_code_fallback(store: MarketStore) ->
     assert m_fetch.call_count == 0
 
 
+def test_default_daily_universe_filters_to_strategy_codes(store: MarketStore) -> None:
+    store.upsert_security_master(
+        [
+            {"code": "000001.SZ", "symbol": "000001", "name": "A", "list_status": "L"},
+            {"code": "000002.SZ", "symbol": "000002", "name": "ST B", "list_status": "L", "is_st": True},
+            {"code": "430001.BJ", "symbol": "430001", "name": "BJ", "list_status": "L", "is_bj": True},
+        ]
+    )
+    captured = {}
+
+    def fake_bulk(store_arg, trade_date, *, codes=None):
+        captured["codes"] = codes
+        return 1
+
+    with mock.patch.object(ms, "_today_cst_str", return_value="2026-06-26"), \
+         mock.patch.object(ms, "_sync_daily_tushare_by_date", side_effect=fake_bulk):
+        res = ms.run_daily_sync("2026-06-25", store=store, datasets={"daily"})
+
+    assert res["daily"] == 1
+    assert captured["codes"] == ["000001.SZ"]
+
+
 def test_security_master_tpdog_fallback_marks_default_universe(store: MarketStore) -> None:
     def fake_call(path: str, **params):
         assert path == "stocks/list"
