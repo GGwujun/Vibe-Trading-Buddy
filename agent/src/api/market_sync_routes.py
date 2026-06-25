@@ -46,6 +46,7 @@ class DailySyncRequest(BaseModel):
     trade_date: Optional[str] = None  # default: latest settled trading day
     codes: Optional[list[str]] = None
     datasets: Optional[list[str]] = None
+    lookback_days: int = 90
 
 
 class SyncResultResponse(BaseModel):
@@ -61,6 +62,7 @@ class BackfillRequest(BaseModel):
     universe: str = "default"  # "default" | "all"
     etf_codes: Optional[list[str]] = None
     codes: Optional[list[str]] = None
+    lookback_days: Optional[int] = None
 
 
 class CodeSyncRequest(BaseModel):
@@ -144,7 +146,11 @@ async def sync_daily(body: DailySyncRequest) -> SyncResultResponse:
     datasets = set(body.datasets) if body.datasets else None
     try:
         rows = run_daily_sync(
-            trade_date, store=store, codes=body.codes, datasets=datasets,
+            trade_date,
+            store=store,
+            codes=body.codes,
+            datasets=datasets,
+            lookback_days=body.lookback_days,
         )
     except Exception as exc:  # noqa: BLE001
         return SyncResultResponse(ok=False, trade_date=trade_date, detail=str(exc)[:300])
@@ -156,7 +162,7 @@ async def sync_daily(body: DailySyncRequest) -> SyncResultResponse:
 @router.post("/code", response_model=SyncResultResponse, dependencies=[Depends(require_admin)])
 async def sync_code(body: CodeSyncRequest) -> SyncResultResponse:
     """Sync a single code's daily-K over [start, end] (defaults: last 90 days)."""
-    from src.data.market_sync import _fetch_daily_range_rows, _to_tpdog_code
+    from src.data.market_sync import _fetch_daily_range_rows, _latest_settled_date_for_sync, _to_tpdog_code
 
     store = _store()
     if store is None:
@@ -171,7 +177,8 @@ async def sync_code(body: CodeSyncRequest) -> SyncResultResponse:
     try:
         rows = _fetch_daily_range_rows(tpdog_code, start, end)
         today_str = _today_cst_str()
-        settled = [r for r in rows if r.get("date") and r["date"] < today_str]
+        latest_settled = _latest_settled_date_for_sync(end, today_str)
+        settled = [r for r in rows if latest_settled and r.get("date") and r["date"] <= latest_settled]
         n = store.upsert_daily_bars(body.code, settled) if settled else 0
     except Exception as exc:  # noqa: BLE001
         return SyncResultResponse(ok=False, trade_date=end, detail=str(exc)[:300])
@@ -195,6 +202,7 @@ async def backfill(body: BackfillRequest) -> dict[str, Any]:
                 today, store=_store(), codes=body.codes,
                 datasets=set(body.datasets), universe=body.universe,
                 etf_codes=body.etf_codes, deadline_seconds=3600,
+                lookback_days=body.lookback_days if body.lookback_days is not None else body.years * 365,
             )
             _backfill_running["last_result"] = {"ok": True, "rows": rows}
         except Exception as exc:  # noqa: BLE001

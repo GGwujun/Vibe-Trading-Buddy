@@ -511,14 +511,14 @@ def _bar_date(index_value: Any) -> str:
 
 
 def _performance_for(record: dict[str, Any]) -> dict[str, Any]:
-    from src.data.ohlcv_cache import fetch_with_cache
+    from src.data.market_data_service import latest_daily_bars
 
     price = float(record.get("price_at_pick", 0) or 0)
     symbol = str(record.get("symbol", ""))
     if not symbol or price <= 0:
         return {"status": "missing_price"}
 
-    df = fetch_with_cache(symbol, days=40)
+    df = latest_daily_bars(symbol, days=40)
     if df is None or df.empty or "close" not in df.columns:
         return {"status": "no_market_data"}
 

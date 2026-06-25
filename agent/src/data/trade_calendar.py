@@ -2,7 +2,7 @@
 
 Single source of truth for "is today a trading day" and "what phase is the
 market in" across the project (replaces the scattered time checks that used to
-live in ohlcv_cache._is_trading_hours, market_sync._maybe_run_daily_sync, and
+live in market_data_service, market_sync._maybe_run_daily_sync, and
 the various loaders).
 
 The holiday calendar is sourced from tpdog (``trading_day/year``) — more

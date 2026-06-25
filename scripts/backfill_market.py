@@ -35,6 +35,13 @@ _AGENT = Path(__file__).resolve().parent.parent / "agent"
 if str(_AGENT) not in sys.path:
     sys.path.insert(0, str(_AGENT))
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(_AGENT / ".env", override=False)
+except Exception:
+    pass
+
 from src.data.market_sync import run_daily_sync  # noqa: E402
 from src.data.market_store import get_market_store  # noqa: E402
 
@@ -77,6 +84,8 @@ def main() -> int:
     ap.add_argument("--datasets", default="daily,dragon,pool,etf",
                     help="comma-separated: daily,dragon,pool,etf,premium,capital")
     ap.add_argument("--universe", default="default", choices=["default", "all"])
+    ap.add_argument("--lookback-days", type=int, default=None,
+                    help="initial daily lookback when a code is cold; use 0 for today-only")
     ap.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     args = ap.parse_args()
 
@@ -132,6 +141,7 @@ def main() -> int:
         rows = run_daily_sync(
             end, store=store, codes=codes, datasets={"daily"},
             deadline_seconds=86400,
+            lookback_days=args.lookback_days if args.lookback_days is not None else args.years * 365,
         )
         print(f"[daily] wrote {rows.get('daily', 0)} rows")
 

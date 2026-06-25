@@ -19,6 +19,7 @@ market is opt-in via ``universe="all"`` because of credit cost).
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -145,6 +146,83 @@ def _fetch_daily_range_rows(tpdog_code: str, start: str, end: str) -> list[dict]
     return out
 
 
+def _sync_daily_tushare_by_date(
+    store: MarketStore,
+    trade_date: str,
+    *,
+    codes: Optional[list[str]] = None,
+) -> int:
+    """Fetch one settled A-share date in bulk via Tushare ``daily``.
+
+    Tushare supports ``daily(trade_date=YYYYMMDD)`` for the whole market, which
+    is the right shape for the daily after-close job. It avoids the expensive
+    per-code TPDog loop; TPDog remains the fallback when Tushare is unavailable.
+    """
+    token = os.getenv("TUSHARE_TOKEN", "").strip()
+    if not token or token.lower() == "your-tushare-token":
+        return 0
+    try:
+        import tushare as ts
+    except Exception:  # noqa: BLE001
+        logger.debug("tushare package unavailable; daily bulk skipped")
+        return 0
+
+    wanted = {c.upper() for c in codes} if codes else None
+    try:
+        api = ts.pro_api(token)
+        df = api.daily(trade_date=trade_date.replace("-", ""))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("tushare daily bulk failed for %s: %s", trade_date, exc)
+        return 0
+    if df is None or df.empty:
+        return 0
+
+    grouped: dict[str, list[dict]] = {}
+    for _, r in df.iterrows():
+        code = str(r.get("ts_code", "")).upper()
+        if not code or (wanted is not None and code not in wanted):
+            continue
+        grouped.setdefault(code, []).append(
+            {
+                "date": trade_date,
+                "open": r.get("open"),
+                "high": r.get("high"),
+                "low": r.get("low"),
+                "close": r.get("close"),
+                "volume": r.get("vol"),
+                "total_amt": r.get("amount"),
+                "rise_rate": r.get("pct_chg"),
+            }
+        )
+
+    written = 0
+    for code, rows in grouped.items():
+        written += store.upsert_daily_bars(code, rows)
+    if written:
+        logger.info("tushare daily bulk wrote %d rows for %s", written, trade_date)
+    return written
+
+
+def _latest_settled_date_for_sync(trade_date: str, today_str: str) -> str | None:
+    """Return the newest date safe to persist for this sync invocation.
+
+    Historical dates are already settled. Today's bar is only settled after the
+    market reaches post-close; before then it is still a provisional intraday
+    bar and must stay out of ``bars_daily``.
+    """
+    if trade_date < today_str:
+        return trade_date
+    if trade_date > today_str:
+        return None
+    try:
+        from src.data.trade_calendar import cn_market_phase
+        return trade_date if cn_market_phase() == "post_close" else None
+    except Exception:  # noqa: BLE001
+        now = _now_cst()
+        minutes = now.hour * 60 + now.minute
+        return trade_date if minutes >= 15 * 60 + 5 else None
+
+
 def _sync_daily_for_code(
     store: MarketStore, code: str, trade_date: str, today_str: str,
     lookback_days: int = 90, deadline: float | None = None,
@@ -170,8 +248,10 @@ def _sync_daily_for_code(
     except Exception as exc:  # noqa: BLE001 — skip this code, keep going
         logger.debug("daily sync %s failed: %s", code, exc)
         return 0
-    # Only persist fully-elapsed bars (strictly before today).
-    rows = [r for r in rows if r.get("date") and r["date"] < today_str]
+    latest_settled = _latest_settled_date_for_sync(trade_date, today_str)
+    if latest_settled is None:
+        return 0
+    rows = [r for r in rows if r.get("date") and r["date"] <= latest_settled]
     if not rows:
         return 0
     return store.upsert_daily_bars(code, rows)
@@ -222,7 +302,8 @@ def _sync_etf_daily(store: MarketStore, etf_codes: list[str], trade_date: str, t
             logger.debug("etf %s sync failed: %s", code, exc)
             continue
         time.sleep(_SLEEP_BETWEEN_CALLS)
-        rows = [r for r in rows if r.get("date") and r["date"] < today_str]
+        latest_settled = _latest_settled_date_for_sync(trade_date, today_str)
+        rows = [r for r in rows if latest_settled and r.get("date") and r["date"] <= latest_settled]
         if rows:
             total += store.upsert_etf_daily(code, rows)
     return total
@@ -258,6 +339,7 @@ def run_daily_sync(
     universe: str = "default",
     etf_codes: Optional[list[str]] = None,
     deadline_seconds: int = _TICK_DEADLINE_SECONDS,
+    lookback_days: int = 90,
 ) -> dict[str, int]:
     """Pull and persist one trade_date's market data. Idempotent + resumable.
 
@@ -282,11 +364,30 @@ def run_daily_sync(
     result: dict[str, int] = {}
 
     if "daily" in datasets:
-        universe_codes = codes if codes is not None else _all_a_share_codes()
+        latest_settled = _latest_settled_date_for_sync(trade_date, today_str)
+        if latest_settled is None:
+            result["daily"] = 0
+            universe_codes = []
+        elif latest_settled == trade_date:
+            written = _sync_daily_tushare_by_date(store, trade_date, codes=codes)
+            if written:
+                result["daily"] = written
+                universe_codes = []
+            else:
+                universe_codes = codes if codes is not None else _all_a_share_codes()
+        else:
+            universe_codes = codes if codes is not None else _all_a_share_codes()
         if universe_codes:
             written = 0
             for i, code in enumerate(universe_codes):
-                written += _sync_daily_for_code(store, code, trade_date, today_str, deadline=deadline)
+                written += _sync_daily_for_code(
+                    store,
+                    code,
+                    trade_date,
+                    today_str,
+                    lookback_days=lookback_days,
+                    deadline=deadline,
+                )
                 if i and i % 200 == 0:
                     logger.info("daily sync: %d/%d codes (%d rows)", i, len(universe_codes), written)
                 if time.monotonic() > deadline:

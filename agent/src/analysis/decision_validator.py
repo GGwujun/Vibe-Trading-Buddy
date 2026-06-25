@@ -130,7 +130,7 @@ def fetch_latest_price(code: str) -> Optional[float]:
     """Best-effort latest close for an A-share code, via tpdog. None on failure."""
     try:
         from src.data.tpdog_client import call
-        from src.data.ohlcv_cache import _to_tpdog_code
+        from src.data.market_sync import _to_tpdog_code
 
         tpdog_code = _to_tpdog_code(code)
         if tpdog_code is None:

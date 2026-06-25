@@ -45,6 +45,50 @@ def test_daily_incremental_and_no_intraday(store: MarketStore) -> None:
     assert store.get_daily_bars("600206.SH", start="2026-06-15", end="2026-06-15") is None
 
 
+def test_today_daily_persists_after_post_close(store: MarketStore) -> None:
+    def fake_fetch(tpdog_code, start, end):
+        return [
+            {"date": "2026-06-25", "open": 1, "high": 2, "low": 1, "close": 2, "volume": 10},
+        ]
+
+    with mock.patch.object(ms, "_fetch_daily_range_rows", side_effect=fake_fetch), \
+         mock.patch.object(ms, "_today_cst_str", return_value="2026-06-25"), \
+         mock.patch("src.data.trade_calendar.cn_market_phase", return_value="post_close"):
+        res = ms.run_daily_sync(
+            "2026-06-25",
+            store=store,
+            codes=["600206.SH"],
+            datasets={"daily"},
+            lookback_days=0,
+        )
+
+    assert res["daily"] == 1
+    df = store.get_daily_bars("600206.SH", start="2026-06-25", end="2026-06-25")
+    assert df is not None and float(df["close"].iloc[0]) == 2.0
+
+
+def test_today_daily_skips_before_post_close(store: MarketStore) -> None:
+    def fake_fetch(tpdog_code, start, end):
+        return [
+            {"date": "2026-06-25", "open": 1, "high": 2, "low": 1, "close": 2, "volume": 10},
+        ]
+
+    with mock.patch.object(ms, "_fetch_daily_range_rows", side_effect=fake_fetch) as m_fetch, \
+         mock.patch.object(ms, "_today_cst_str", return_value="2026-06-25"), \
+         mock.patch("src.data.trade_calendar.cn_market_phase", return_value="in_session"):
+        res = ms.run_daily_sync(
+            "2026-06-25",
+            store=store,
+            codes=["600206.SH"],
+            datasets={"daily"},
+            lookback_days=0,
+        )
+
+    assert res["daily"] == 0
+    assert m_fetch.call_count == 0
+    assert store.get_daily_bars("600206.SH", start="2026-06-25", end="2026-06-25") is None
+
+
 def test_daily_skips_already_synced_code(store: MarketStore) -> None:
     """last_daily_date == trade_date → no fetch call."""
     store.upsert_daily_bars("600206.SH", [
@@ -55,6 +99,17 @@ def test_daily_skips_already_synced_code(store: MarketStore) -> None:
         res = ms.run_daily_sync("2026-06-11", store=store, datasets={"daily"})
     assert m_fetch.call_count == 0
     assert res.get("daily", 0) == 0
+
+
+def test_daily_uses_tushare_bulk_before_per_code_fallback(store: MarketStore) -> None:
+    with mock.patch.object(ms, "_today_cst_str", return_value="2026-06-26"), \
+         mock.patch.object(ms, "_sync_daily_tushare_by_date", return_value=2) as m_bulk, \
+         mock.patch.object(ms, "_fetch_daily_range_rows") as m_fetch:
+        res = ms.run_daily_sync("2026-06-25", store=store, datasets={"daily"})
+
+    assert res["daily"] == 2
+    m_bulk.assert_called_once()
+    assert m_fetch.call_count == 0
 
 
 def test_single_dataset_failure_does_not_block_siblings(store: MarketStore) -> None:

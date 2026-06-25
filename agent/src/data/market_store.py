@@ -175,7 +175,7 @@ class MarketStore:
     def _rows_to_ohlcv_df(rows: list[sqlite3.Row]) -> Optional[pd.DataFrame]:
         """Build the canonical OHLCV DataFrame (index=date, 5 fixed cols).
 
-        Mirrors the shape returned by ``ohlcv_cache._fetch_bars_mootdx`` so
+        Mirrors the canonical OHLCV DataFrame shape so
         alpha_signals / position_routes / opportunity_routes see no difference.
         """
         if not rows:
@@ -665,7 +665,7 @@ _store_lock = threading.Lock()
 def get_market_store() -> Optional[MarketStore]:
     """Return the process-wide MarketStore singleton, or None on any failure.
 
-    Callers in read paths (ohlcv_cache, routes) MUST tolerate ``None`` and fall
+    Callers in read paths (market_data_service, routes) MUST tolerate ``None`` and fall
     back to the live data chain — a DB init failure must never break reads.
     """
     global _store_singleton

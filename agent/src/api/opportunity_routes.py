@@ -138,16 +138,16 @@ def _fetch_top_stocks(limit: int = 200) -> list[dict[str, Any]]:
             if i < len(sh_stocks):
                 all_stocks.append(sh_stocks[i])
 
-        # Use disk-cached batch fetch for bar data
-        from src.data.ohlcv_cache import fetch_batch
+        # Use local DB bar data. Scheduled sync/backfill keeps this warm.
+        from src.data.market_data_service import daily_bars_batch
 
         top_n = min(len(all_stocks), limit * 3)
         sampled = all_stocks[:top_n]
         symbols = [s["symbol"] for s in sampled]
 
-        bar_data = fetch_batch(symbols, days=30)
-        logger.info("Opportunity scan: %d/%d symbols cached, fetched %d fresh",
-                     len(bar_data), len(symbols), len(symbols) - len(bar_data))
+        bar_data = daily_bars_batch(symbols, days=30)
+        logger.info("Opportunity scan: %d/%d symbols available in local DB",
+                     len(bar_data), len(symbols))
 
         stock_data: list[dict[str, Any]] = []
         for s in sampled:

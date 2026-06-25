@@ -122,8 +122,8 @@ def _layer_macro() -> dict[str, Any]:
 
     # 1a. Index trend (disk-cached)
     try:
-        from src.data.ohlcv_cache import fetch_with_cache
-        df = fetch_with_cache("999999.SH", days=30)
+        from src.data.market_data_service import latest_daily_bars
+        df = latest_daily_bars("999999.SH", days=30)
         if df is not None and not df.empty:
             close = df["close"].astype(float)
             volume = df["volume"].astype(float)

@@ -22,7 +22,7 @@ from src.data import schedule_store
 
 logger = logging.getLogger(__name__)
 
-# Beijing time (UTC+8) — matches the convention in ohlcv_cache.py
+# Beijing time (UTC+8) — matches the market-data scheduler convention.
 _CST = timezone(timedelta(hours=8))
 
 _TICK_SECONDS = 30

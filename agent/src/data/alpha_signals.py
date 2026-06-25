@@ -147,9 +147,9 @@ def _load_peer_panel(codes: list[str], days: int = 90) -> dict[str, pd.DataFrame
 
     Returns panel dict: {col_name: DataFrame(index=date, columns=code)}.
     """
-    from src.data.ohlcv_cache import fetch_batch
+    from src.data.market_data_service import daily_bars_batch
 
-    data = fetch_batch(codes, days=days)
+    data = daily_bars_batch(codes, days=days)
     if not data:
         return {}
 

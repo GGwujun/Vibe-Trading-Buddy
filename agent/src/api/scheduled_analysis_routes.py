@@ -30,7 +30,7 @@ _SYMBOL_RE = re.compile(r"^\d{6}(\.(SZ|SH))?$")
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _HORIZONS = ("短线", "中线", "长线")
 
-# Beijing time (UTC+8) — matches the convention in ohlcv_cache.py
+# Beijing time (UTC+8) — matches the market-data scheduler convention.
 _CST = timezone(timedelta(hours=8))
 
 

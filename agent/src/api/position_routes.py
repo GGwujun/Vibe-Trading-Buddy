@@ -54,12 +54,10 @@ def _fetch_a_share_data(codes: list[str], days: int = 90) -> dict[str, pd.DataFr
 
     Returns: ``{code: DataFrame(cols=open,high,low,close,volume)}``
     """
-    from src.data.ohlcv_cache import fetch_batch
+    from src.data.market_data_service import daily_bars_batch
 
-    # -- Primary: mootdx with Parquet disk cache --
-    results = fetch_batch(codes, days=days)
-    if results:
-        return results
+    results = daily_bars_batch(codes, days=days)
+    return results
 
     # -- Fallback: Tushare --
     token = os.getenv("TUSHARE_TOKEN", "").strip()
@@ -115,8 +113,8 @@ def _fetch_a_share_data(codes: list[str], days: int = 90) -> dict[str, pd.DataFr
 def _fetch_index_data() -> dict[str, Any] | None:
     """Fetch 上证指数 via disk-cached mootdx."""
     try:
-        from src.data.ohlcv_cache import fetch_with_cache
-        df = fetch_with_cache("999999.SH", days=10)
+        from src.data.market_data_service import latest_daily_bars
+        df = latest_daily_bars("999999.SH", days=10)
         if df is not None and not df.empty:
             close = df["close"].astype(float)
             price = round(float(close.iloc[-1]), 2)

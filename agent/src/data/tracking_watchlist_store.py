@@ -17,7 +17,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
-# Beijing time (UTC+8) — matches the convention in ohlcv_cache.py
+# Beijing time (UTC+8) — matches the market-data scheduler convention.
 _CST = timezone(timedelta(hours=8))
 
 
