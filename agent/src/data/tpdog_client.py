@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.tpdog.com/api/hs"
 DEFAULT_TIMEOUT = 10  # seconds
+_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 
 class TpdogError(RuntimeError):
@@ -42,6 +44,15 @@ class TpdogNotConfiguredError(TpdogError):
 def get_token() -> str:
     """Return the configured TPDOG_TOKEN, or raise if unset/placeholder."""
     token = os.environ.get("TPDOG_TOKEN", "").strip()
+    if not token and _ENV_PATH.exists():
+        try:
+            for line in _ENV_PATH.read_text(encoding="utf-8").splitlines():
+                key, sep, value = line.partition("=")
+                if sep and key.strip() == "TPDOG_TOKEN":
+                    token = value.strip().strip('"').strip("'")
+                    break
+        except OSError as exc:
+            logger.debug("failed to read %s: %s", _ENV_PATH, exc)
     if not token or token.lower() == "your-tpdog-token":
         raise TpdogNotConfiguredError()
     return token

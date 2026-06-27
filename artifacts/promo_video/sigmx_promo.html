@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SigmX Promo</title>
+  <style>
+    :root {
+      --bg: #070a10;
+      --panel: #0d121c;
+      --panel2: #111827;
+      --line: #202a3a;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --red: #fb3f65;
+      --green: #22c55e;
+      --gold: #f5b942;
+      --blue: #38bdf8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 82% 12%, rgba(56,189,248,.16), transparent 30%),
+        radial-gradient(circle at 18% 82%, rgba(34,197,94,.12), transparent 30%),
+        var(--bg);
+      color: var(--text);
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", Arial, sans-serif;
+    }
+    .scene { width: 1920px; height: 1080px; padding: 42px 58px; position: relative; }
+    .topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:22px; }
+    .brand { display:flex; align-items:center; gap:16px; }
+    .logo { width:52px; height:52px; border-radius:14px; background:linear-gradient(135deg,#ef4444,#7c2d12); display:grid; place-items:center; font-weight:900; }
+    .brand h1 { margin:0; font-size:30px; letter-spacing:.2px; }
+    .brand p { margin:5px 0 0; color:var(--muted); font-size:15px; }
+    .date { color:var(--muted); font-size:18px; }
+    .grid { display:grid; gap:20px; }
+    .cols-4 { grid-template-columns: repeat(4, 1fr); }
+    .cols-3 { grid-template-columns: repeat(3, 1fr); }
+    .main { display:grid; grid-template-columns: 1.18fr .82fr; gap:24px; }
+    .card { background:rgba(13,18,28,.88); border:1px solid var(--line); border-radius:12px; box-shadow:0 20px 60px rgba(0,0,0,.22); }
+    .card-h { padding:18px 22px; border-bottom:1px solid var(--line); color:#dbeafe; font-weight:700; font-size:20px; display:flex; justify-content:space-between; align-items:center; }
+    .card-b { padding:22px; }
+    .hero { height:760px; display:flex; flex-direction:column; justify-content:center; padding:52px; }
+    .eyebrow { color:var(--gold); font-weight:700; font-size:24px; margin-bottom:18px; }
+    .title { font-size:68px; line-height:1.08; font-weight:900; letter-spacing:-1px; margin:0; }
+    .subtitle { margin-top:22px; color:#cbd5e1; font-size:28px; line-height:1.45; max-width:1100px; }
+    .pill { display:inline-flex; align-items:center; gap:8px; padding:8px 12px; border-radius:999px; background:#162033; border:1px solid #26354d; color:#cbd5e1; font-size:15px; }
+    .metric { padding:22px; }
+    .metric .label { color:var(--muted); font-size:16px; }
+    .metric .value { font-size:44px; margin-top:8px; font-weight:900; }
+    .up { color:var(--red); }
+    .down { color:var(--green); }
+    .gold { color:var(--gold); }
+    .blue { color:var(--blue); }
+    .line-row { display:flex; justify-content:space-between; align-items:center; gap:18px; padding:15px 0; border-bottom:1px solid rgba(148,163,184,.14); font-size:19px; }
+    .line-row:last-child { border-bottom:0; }
+    .small { color:var(--muted); font-size:15px; }
+    .bars { display:flex; flex-direction:column; gap:14px; }
+    .bar { display:grid; grid-template-columns: 130px 1fr 70px; align-items:center; gap:14px; font-size:17px; }
+    .track { height:14px; background:#172033; border-radius:999px; overflow:hidden; }
+    .fill { height:100%; background:linear-gradient(90deg,var(--red),#f97316); border-radius:999px; }
+    .flow { display:grid; grid-template-columns:repeat(4,1fr); gap:18px; margin-top:36px; }
+    .step { padding:22px; min-height:205px; position:relative; overflow:hidden; }
+    .step .time { color:var(--gold); font-size:23px; font-weight:900; }
+    .step h3 { margin:14px 0 10px; font-size:28px; }
+    .step p { margin:0; color:#cbd5e1; font-size:18px; line-height:1.45; }
+    .caption { position:absolute; left:0; right:0; bottom:38px; text-align:center; font-size:42px; font-weight:900; text-shadow:0 4px 28px rgba(0,0,0,.75); }
+    .caption span { background:rgba(0,0,0,.48); padding:14px 30px; border-radius:10px; }
+    .terminal { background:#05070b; border:1px solid #1f2937; border-radius:12px; padding:22px; font-family:Consolas, monospace; color:#cbd5e1; font-size:18px; line-height:1.65; min-height:340px; }
+    .glow { box-shadow:0 0 0 1px rgba(245,185,66,.22), 0 0 42px rgba(245,185,66,.10); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    const scenes = [
+      {
+        cap: "从盘前到盘后，把交易日交给 AI 工作台",
+        html: `
+          <div class="hero card glow">
+            <div class="eyebrow">SigmX · AI 投研与盘面决策平台</div>
+            <h2 class="title">不只是看行情<br/>而是让 AI 跑完整交易日流程</h2>
+            <div class="subtitle">早盘内参、盘中监控、尾盘策略、收盘复盘，一套工作流沉淀每天的交易判断。</div>
+            <div class="flow">
+              <div class="step card"><div class="time">08:50</div><h3>早盘内参</h3><p>政策、新闻、指数、事件催化和关注标的。</p></div>
+              <div class="step card"><div class="time">盘中</div><h3>盘中监控</h3><p>异动、行业热度、自选任务和风险提醒。</p></div>
+              <div class="step card"><div class="time">14:30</div><h3>尾盘策略</h3><p>重点跟踪、等回落、轻仓观察、风险规避。</p></div>
+              <div class="step card"><div class="time">收盘</div><h3>收盘复盘</h3><p>推荐表现、市场广度、明日观察清单。</p></div>
+            </div>
+          </div>`
+      },
+      {
+        cap: "早盘内参：开盘前先读懂今天的市场",
+        html: `
+          <div class="grid cols-4">
+            <div class="card metric"><div class="label">上证指数</div><div class="value up">+0.62%</div><div class="small">隔夜外盘与政策共振</div></div>
+            <div class="card metric"><div class="label">上涨 / 下跌</div><div class="value">3124 / 1786</div><div class="small">市场广度偏强</div></div>
+            <div class="card metric"><div class="label">涨停近似</div><div class="value gold">42</div><div class="small">题材活跃度回升</div></div>
+            <div class="card metric"><div class="label">成交额</div><div class="value blue">9,860亿</div><div class="small">量能维持高位</div></div>
+          </div>
+          <div class="main" style="margin-top:24px">
+            <div class="card"><div class="card-h">早盘内参</div><div class="card-b">
+              <div class="line-row"><b>政策线索</b><span>机器人、半导体设备、新能源车补链</span></div>
+              <div class="line-row"><b>隔夜影响</b><span>纳指走强，AI 算力链继续扩散</span></div>
+              <div class="line-row"><b>风险提示</b><span>高开过多标的，等待承接确认</span></div>
+              <div class="line-row"><b>早盘关注</b><span>中科曙光 / 工业富联 / 新易盛 / 拓普集团</span></div>
+            </div></div>
+            <div class="card"><div class="card-h">事件催化</div><div class="card-b">
+              <div class="line-row"><span>AI 服务器招标</span><b class="up">高</b></div>
+              <div class="line-row"><span>机器人大会</span><b class="gold">中高</b></div>
+              <div class="line-row"><span>出口管制扰动</span><b class="down">风险</b></div>
+              <div class="line-row"><span>业绩预告窗口</span><b class="gold">关注</b></div>
+            </div></div>
+          </div>`
+      },
+      {
+        cap: "盘中监控：异动、板块、自选股持续盯盘",
+        html: `
+          <div class="main">
+            <div class="card"><div class="card-h">行业热度 TOP</div><div class="card-b bars">
+              ${["机器人","光模块","半导体","算力租赁","新能源车","低空经济"].map((n,i)=>`<div class="bar"><span>${n}</span><div class="track"><div class="fill" style="width:${92-i*9}%"></div></div><b class="up">+${(4.8-i*.42).toFixed(2)}%</b></div>`).join("")}
+            </div></div>
+            <div class="card"><div class="card-h">盘中监控</div><div class="card-b">
+              <div class="line-row"><b class="up">工业富联</b><span>放量突破，等待回踩确认</span></div>
+              <div class="line-row"><b class="up">新易盛</b><span>光模块扩散，注意涨幅偏高</span></div>
+              <div class="line-row"><b class="gold">拓普集团</b><span>机器人链异动，加入观察池</span></div>
+              <div class="line-row"><b class="down">高位题材</b><span>冲高回落，轻仓防守</span></div>
+            </div></div>
+          </div>
+          <div class="grid cols-3" style="margin-top:24px">
+            <div class="card metric"><div class="label">自选定时任务</div><div class="value">18</div><div class="small">到点自动保存分析</div></div>
+            <div class="card metric"><div class="label">风险提醒</div><div class="value gold">6</div><div class="small">涨幅过高 / 量价背离</div></div>
+            <div class="card metric"><div class="label">机会池候选</div><div class="value blue">36</div><div class="small">按置信度动态排序</div></div>
+          </div>`
+      },
+      {
+        cap: "尾盘策略：收盘前给出动作建议",
+        html: `
+          <div class="card"><div class="card-h">尾盘策略清单</div><div class="card-b">
+            <div class="line-row"><b>中科曙光</b><span class="pill">重点跟踪</span><span>承接良好，保留明日观察</span><b class="up">86</b></div>
+            <div class="line-row"><b>新易盛</b><span class="pill">等回落</span><span>涨幅偏高，不追价</span><b class="gold">81</b></div>
+            <div class="line-row"><b>拓普集团</b><span class="pill">轻仓观察</span><span>机器人链扩散，等待确认</span><b class="blue">73</b></div>
+            <div class="line-row"><b>高位连板</b><span class="pill">风险规避</span><span>冲高回落，尾盘降低动作优先级</span><b class="down">42</b></div>
+          </div></div>
+          <div class="grid cols-3" style="margin-top:24px">
+            <div class="card metric"><div class="label">重点跟踪</div><div class="value up">5</div><div class="small">收盘承接确认</div></div>
+            <div class="card metric"><div class="label">等回落</div><div class="value gold">8</div><div class="small">不追高，等次日分歧</div></div>
+            <div class="card metric"><div class="label">风险规避</div><div class="value down">3</div><div class="small">量价背离或情绪退潮</div></div>
+          </div>`
+      },
+      {
+        cap: "收盘复盘：把今天的判断沉淀成明天的清单",
+        html: `
+          <div class="main">
+            <div class="card"><div class="card-h">收盘复盘</div><div class="card-b">
+              <div class="line-row"><b>推荐数量</b><span>早盘 5 · 尾盘 5</span></div>
+              <div class="line-row"><b>平均表现</b><span class="up">+1.82%</span></div>
+              <div class="line-row"><b>命中率</b><span class="up">64%</span></div>
+              <div class="line-row"><b>明日观察</b><span>算力、机器人、半导体设备</span></div>
+            </div></div>
+            <div class="card"><div class="card-h">复盘问题</div><div class="card-b">
+              <div class="line-row"><span>推荐是否跑赢市场广度？</span><b>是</b></div>
+              <div class="line-row"><span>尾盘强势股是否有真实承接？</span><b>待确认</b></div>
+              <div class="line-row"><span>明日优先观察哪些事件扩散？</span><b>已生成</b></div>
+            </div></div>
+          </div>
+          <div class="terminal" style="margin-top:24px">
+            > AI 收盘复盘完成<br/>
+            - 市场广度：上涨家数占优，题材扩散仍在<br/>
+            - 风险：高位标的分歧放大，不追涨<br/>
+            - 明日计划：优先观察算力链承接和机器人事件催化
+          </div>`
+      },
+      {
+        cap: "不止复盘：多 Agent 投研、基金套利、因子工厂都在同一平台",
+        html: `
+          <div class="grid cols-3">
+            <div class="step card glow"><div class="time">AlphaForge</div><h3>多 Agent 个股深研</h3><p>技术面、基本面、新闻、政策、资金、风险，多空辩论后给出裁决。</p></div>
+            <div class="step card glow"><div class="time">套利分析</div><h3>LOF / ETF 折溢价扫描</h3><p>全市场扫描机会，单基金生成深度套利报告。</p></div>
+            <div class="step card glow"><div class="time">因子工厂</div><h3>Alpha 因子验证</h3><p>浏览、筛选、批量评估 Alpha101 / GTJA191 / Qlib 因子。</p></div>
+          </div>
+          <div class="grid cols-4" style="margin-top:28px">
+            <div class="card metric"><div class="label">多智能体</div><div class="value">16+</div></div>
+            <div class="card metric"><div class="label">因子库</div><div class="value">452</div></div>
+            <div class="card metric"><div class="label">交易日阶段</div><div class="value">4</div></div>
+            <div class="card metric"><div class="label">通知推送</div><div class="value">3</div></div>
+          </div>`
+      },
+      {
+        cap: "SigmX：让每个交易日都有结构、有证据、有复盘",
+        html: `
+          <div class="hero card glow">
+            <div class="eyebrow">SigmX</div>
+            <h2 class="title">AI 盘面决策平台</h2>
+            <div class="subtitle">从早盘内参、盘中监控、尾盘策略到收盘复盘，把交易流程变成可追踪、可沉淀、可复用的 AI 工作台。</div>
+            <div style="display:flex; gap:18px; margin-top:42px">
+              <span class="pill">A 股投研</span>
+              <span class="pill">多 Agent 报告</span>
+              <span class="pill">机会扫描</span>
+              <span class="pill">自动推送</span>
+              <span class="pill">风险提示</span>
+            </div>
+          </div>`
+      }
+    ];
+    const scene = Number(new URLSearchParams(location.search).get("scene") || 0);
+    const item = scenes[Math.max(0, Math.min(scene, scenes.length - 1))];
+    document.getElementById("root").innerHTML = `
+      <div class="scene">
+        <div class="topbar">
+          <div class="brand">
+            <div class="logo">涨</div>
+            <div><h1>SigmX</h1><p>AI Trading Intelligence</p></div>
+          </div>
+          <div class="date">2026 · AI 盘面工作流</div>
+        </div>
+        ${item.html}
+        <div class="caption"><span>${item.cap}</span></div>
+      </div>`;
+  </script>
+</body>
+</html>
