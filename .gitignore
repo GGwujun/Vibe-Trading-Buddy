@@ -72,6 +72,10 @@ assets/*.mp4
 
 # Local demo / promo production workspace
 demo/
+artifacts/
+
+# Windows reserved-name junk (created by `2>nul` redirection accidents)
+agent/nul
 
 # Manual E2E smoke tests — require live API keys (OpenRouter / yfinance),
 # would break CI if committed. Kept local; run explicitly when validating

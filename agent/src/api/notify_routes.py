@@ -12,11 +12,13 @@ not require_user.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 
 from src.notify.models import NotifyConfig, TestRequest, TestResponse
+from src.notify.scheduler import notify_scheduler_enabled, run_notify_scheduler_loop
 from src.notify.sender import send
 from src.notify.store import load_config, save_config
 from src.notify.summary import build_summary
@@ -53,5 +55,12 @@ def register_notify_routes(
         return TestResponse(ok=ok, message=message)
 
     app.include_router(router)
+
+    @app.on_event("startup")
+    async def start_notify_scheduler() -> None:
+        if not notify_scheduler_enabled():
+            return
+        app.state.notify_scheduler_task = asyncio.create_task(run_notify_scheduler_loop())
+
     logger.info("Notify routes registered")
     return router

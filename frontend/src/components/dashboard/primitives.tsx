@@ -57,13 +57,14 @@ export function fmtYi(v: number | null | undefined): string {
   return v.toFixed(0);
 }
 
+// 热力图涨跌背景色：涨红、跌绿（A 股习惯），颜色饱和度随 |涨跌幅| 连续加深，
+// 上限在约 8% 处达到最深，避免小幅波动时整片灰白看不出区分。
 export function pctBg(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "transparent";
-  if (value > 5) return "rgba(239,68,68,0.55)";
-  if (value > 2) return "rgba(239,68,68,0.32)";
-  if (value > 0) return "rgba(239,68,68,0.16)";
-  if (value < -5) return "rgba(34,197,94,0.55)";
-  if (value < -2) return "rgba(34,197,94,0.32)";
-  if (value < 0) return "rgba(34,197,94,0.16)";
-  return "transparent";
+  if (value === null || value === undefined) return "rgba(100,116,139,0.55)";
+  if (value === 0) return "rgba(100,116,139,0.55)";
+  const abs = Math.min(Math.abs(value), 8);
+  // 深度 0.5 ~ 1：abs=0 时 0.5，abs>=8 时 1，平滑过渡
+  const depth = 0.5 + (abs / 8) * 0.5;
+  const alpha = depth.toFixed(2);
+  return value > 0 ? `rgba(239,68,68,${alpha})` : `rgba(22,163,74,${alpha})`;
 }

@@ -97,23 +97,44 @@ def test_meta_round_trip(store: MarketStore) -> None:
 def test_table_counts_and_range(store: MarketStore) -> None:
     store.upsert_daily_bars("600206.SH", [_row("2026-06-10"), _row("2026-06-11")])
     store.upsert_security_master([{"code": "600206.SH", "name": "X", "list_status": "L"}])
+    store.upsert_trade_calendar([{"date": "2026-06-11", "is_trading": True}])
+    store.upsert_realtime_quotes("2026-06-11", [{"code": "600206.SH", "price": 12.3}])
     store.upsert_stock_daily_basic([{"code": "600206.SH", "trade_date": "2026-06-11", "pe": 10.5}])
     store.upsert_etf_master([{"code": "510300.SH", "list_date": "20120528", "csname": "CSI300"}])
+    store.upsert_fund_daily("510300.SH", [{"trade_date": "2026-06-11", "close": 4.05}])
     store.upsert_etf_share_size([{"code": "510300.SH", "trade_date": "2026-06-11", "total_size": 100}])
+    store.upsert_index_master([{"code": "zssh.000300", "name": "CSI300", "type": "zssh"}])
     store.upsert_index_daily("000300.SH", [{"trade_date": "2026-06-11", "close": 4000}])
+    store.upsert_board_master([{"code": "bki.880001", "name": "Industry", "board_type": "industry"}])
+    store.upsert_board_members("bki.880001", "industry", [{"code": "600206.SH", "name": "X"}])
+    store.upsert_board_daily("bki.880001", [{"trade_date": "2026-06-11", "close": 100}])
     counts = store.table_counts()
+    assert counts["trade_calendar"] == 1
     assert counts["security_master"] == 1
     assert counts["bars_daily"] == 2
+    assert counts["realtime_quote_snapshot"] == 1
     assert counts["stock_daily_basic"] == 1
     assert counts["etf_master"] == 1
+    assert counts["fund_daily"] == 1
     assert counts["etf_share_size"] == 1
+    assert counts["index_master"] == 1
     assert counts["index_daily"] == 1
+    assert counts["board_master"] == 1
+    assert counts["board_members"] == 1
+    assert counts["board_daily"] == 1
+    assert store.date_range("trade_calendar") == ("2026-06-11", "2026-06-11")
     lo, hi = store.date_range("bars_daily")
     assert lo == "2026-06-10" and hi == "2026-06-11"
+    assert store.date_range("realtime_quote_snapshot") == ("2026-06-11", "2026-06-11")
     assert store.date_range("stock_daily_basic") == ("2026-06-11", "2026-06-11")
     assert store.date_range("etf_master") == ("20120528", "20120528")
+    assert store.date_range("fund_daily") == ("2026-06-11", "2026-06-11")
     assert store.date_range("etf_share_size") == ("2026-06-11", "2026-06-11")
+    assert store.date_range("index_master") != (None, None)
     assert store.date_range("index_daily") == ("2026-06-11", "2026-06-11")
+    assert store.date_range("board_master") != (None, None)
+    assert store.date_range("board_members") != (None, None)
+    assert store.date_range("board_daily") == ("2026-06-11", "2026-06-11")
 
 
 def test_market_coverage_and_missing_daily_codes(store: MarketStore) -> None:

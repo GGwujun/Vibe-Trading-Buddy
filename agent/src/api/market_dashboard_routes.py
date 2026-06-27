@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 import pandas as pd
@@ -28,6 +28,57 @@ def _now_cst() -> datetime:
 
 def _today_cst() -> str:
     return _now_cst().strftime("%Y-%m-%d")
+
+
+def _previous_weekday(date_str: str) -> str:
+    cur = datetime.strptime(date_str, "%Y-%m-%d").date() - timedelta(days=1)
+    while cur.weekday() >= 5:
+        cur -= timedelta(days=1)
+    return cur.strftime("%Y-%m-%d")
+
+
+def _close_review_visible_trade_date() -> str:
+    """Latest trading date whose close review is allowed to be shown."""
+    today = _today_cst()
+    now = _now_cst()
+    try:
+        from src.data.trade_calendar import cn_market_phase, is_trading_day, previous_trading_day
+
+        if is_trading_day(today) and cn_market_phase(now) == "post_close":
+            return today
+        return previous_trading_day(today)
+    except Exception:  # noqa: BLE001
+        if now.weekday() < 5 and now.time() >= time(15, 0):
+            return today
+        return _previous_weekday(today)
+
+
+def _stage_payload_with_freshness(stage: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(snapshot.get("payload") or {})
+    payload.setdefault("trade_date", snapshot.get("trade_date"))
+    payload.setdefault("source_policy", "db_only")
+    payload["snapshot_updated_at"] = snapshot.get("updated_at")
+    if stage != "morning-brief":
+        return payload
+
+    today = _today_cst()
+    is_today_trading = False
+    try:
+        from src.data.trade_calendar import is_trading_day
+
+        is_today_trading = is_trading_day(today)
+    except Exception:  # noqa: BLE001
+        is_today_trading = _now_cst().weekday() < 5
+    payload["expected_trade_date"] = today if is_today_trading else snapshot.get("trade_date")
+    payload["freshness_policy"] = "trading-day premarket snapshot; generated after 07:30 CST"
+    payload["is_stale"] = bool(is_today_trading and snapshot.get("trade_date") != today)
+    if payload["is_stale"]:
+        missing = set(payload.get("missing_tables") or [])
+        missing.add("market_stage_snapshot:today")
+        payload["missing_tables"] = sorted(missing)
+        payload["data_status"] = "stale"
+        payload["stale_reason"] = f"早盘内参快照仍是 {snapshot.get('trade_date')}，今天 {today} 的盘前快照尚未同步。"
+    return payload
 
 
 def _load_recommendations(limit: int = 30) -> dict[str, Any]:
@@ -251,6 +302,9 @@ def _market_store():
 
 # Consecutive limit-up field names across tpdog/akshare variants.
 _LIANBAN_KEYS = ("连板数", "连板", "连续涨停天数", "连续涨停", "lianban", "lbsd", "lbc")
+
+
+_LIANBAN_KEYS = ("c_times", "连板数", "连板", "连续涨停天数", "连续涨停", "lianban", "lbsd", "lbc")
 
 
 def _row_lianban(row: dict[str, Any]) -> int:
@@ -989,29 +1043,37 @@ def _db_market_overview() -> dict[str, Any]:
             "change_pct": round(float(row["rise_rate"] or 0), 2),
         }
 
-    idx_date_row = conn.execute("SELECT MAX(trade_date) AS d FROM index_daily").fetchone()
-    idx_date = idx_date_row["d"] if idx_date_row and idx_date_row["d"] else None
     index_rows: list[dict[str, Any]] = []
-    if idx_date:
-        name_map = {
-            "000001.SH": "上证指数",
-            "399001.SZ": "深证成指",
-            "399006.SZ": "创业板指",
-            "000300.SH": "沪深300",
-            "000905.SH": "中证500",
-            "000852.SH": "中证1000",
-            "000688.SH": "科创50",
-        }
-        for r in conn.execute(
-            "SELECT code, close, pct_chg FROM index_daily WHERE trade_date = ? ORDER BY code",
-            (idx_date,),
-        ).fetchall():
-            index_rows.append({
-                "symbol": r["code"],
-                "name": name_map.get(r["code"], r["code"]),
-                "price": round(float(r["close"] or 0), 2),
-                "change_pct": round(float(r["pct_chg"] or 0), 2),
-            })
+    name_map = {
+        "000001.SH": "上证指数",
+        "399001.SZ": "深证成指",
+        "399006.SZ": "创业板指",
+        "000300.SH": "沪深300",
+        "000905.SH": "中证500",
+        "000852.SH": "中证1000",
+        "000688.SH": "科创50",
+        "899050.BJ": "北证50",
+    }
+    for code in name_map:
+        r = conn.execute(
+            """
+            SELECT code, close, pct_chg, trade_date
+            FROM index_daily
+            WHERE code = ?
+            ORDER BY trade_date DESC
+            LIMIT 1
+            """,
+            (code,),
+        ).fetchone()
+        if not r:
+            continue
+        index_rows.append({
+            "symbol": r["code"],
+            "name": name_map.get(r["code"], r["code"]),
+            "price": round(float(r["close"] or 0), 2),
+            "change_pct": round(float(r["pct_chg"] or 0), 2),
+            "trade_date": r["trade_date"],
+        })
 
     return {
         "as_of": _now_cst().isoformat(),
@@ -1034,44 +1096,7 @@ def _db_market_overview() -> dict[str, Any]:
 
 
 def _load_market_overview() -> dict[str, Any]:
-    try:
-        spot = _fetch_a_share_spot()
-        if spot is None or spot.empty:
-            raise RuntimeError("A-share spot data unavailable")
-        change_col = _column(spot, ("涨跌幅", "change_pct", "changepercent"), 4)
-        sorted_spot = (
-            spot.assign(_change=spot[change_col].map(_number)).sort_values("_change", ascending=False)
-            if change_col else spot
-        )
-        industry_rows: list[dict[str, Any]] = []
-        try:
-            industry = _fetch_industry_spot()
-            if industry is not None and not industry.empty:
-                industry_rows = _clean_sector_rows(industry)
-        except Exception as exc:  # noqa: BLE001
-            logger.info("market overview: industry fetch failed: %s", exc)
-        index_rows: list[dict[str, Any]] = []
-        try:
-            index_df = _fetch_index_spot()
-            if index_df is not None and not index_df.empty:
-                index_rows = _clean_index_rows(index_df)
-        except Exception as exc:  # noqa: BLE001
-            logger.info("market overview: index fetch failed: %s", exc)
-        return {
-            "as_of": _now_cst().isoformat(),
-            "source": "akshare",
-            "breadth": _clean_breadth_from_spot(spot),
-            "indices": index_rows,
-            "hot_sectors": industry_rows,
-            "top_gainers": _clean_stock_rows(sorted_spot, limit=8),
-            "top_losers": _clean_stock_rows(
-                sorted_spot.sort_values("_change", ascending=True) if "_change" in sorted_spot else spot,
-                limit=8,
-            ),
-        }
-    except Exception as exc:  # noqa: BLE001
-        logger.info("market overview: live source failed, using local DB: %s", exc)
-        return _db_market_overview()
+    return _db_market_overview()
 
 
 def _compute_sentiment(
@@ -1428,6 +1453,139 @@ def _close_review(
     }
 
 
+def _load_pools(trade_date: str) -> dict[str, Any] | None:
+    store = _market_store()
+    pool_date = store.latest_date("stock_pool") or trade_date
+    try:
+        limit_up = store.get_pool("limitup", pool_date)
+        limit_down = store.get_pool("limitdown", pool_date)
+        fire = store.get_pool("fire", pool_date)
+        previous = store.get_pool("previous", pool_date)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("pools load failed: %s", exc)
+        return None
+    if not limit_up and not limit_down:
+        return None
+
+    name_map = store.security_names([
+        str(row.get("code") or row.get("symbol") or "")
+            for row in [*limit_up, *limit_down, *fire]
+    ])
+
+    def _pool_symbol(row: dict[str, Any]) -> str:
+        return str(row.get("code") or row.get("symbol") or "")
+
+    def _pool_name(row: dict[str, Any]) -> str:
+        symbol = _pool_symbol(row)
+        return name_map.get(symbol.upper()) or name_map.get(symbol.split(".", 1)[0]) or str(row.get("name") or symbol)
+
+    ladder_buckets: dict[int, list[dict[str, Any]]] = {}
+    for row in limit_up:
+        days = _row_lianban(row)
+        ladder_buckets.setdefault(days, []).append({
+            "symbol": _pool_symbol(row),
+            "name": _pool_name(row),
+            "days": days,
+        })
+    ladder = [
+        {"days": days, "count": len(stocks), "stocks": stocks}
+        for days, stocks in sorted(ladder_buckets.items(), reverse=True)
+    ]
+
+    def _fmt(rows: list[dict[str, Any]], *, with_days: bool = False) -> list[dict[str, Any]]:
+        out = []
+        for r in rows[:30]:
+            out.append({
+                "symbol": _pool_symbol(r),
+                "name": _pool_name(r),
+                "days": (_row_lianban(r) if with_days else 0),
+            })
+        return out
+
+    non_st_limit_up = sum(1 for row in limit_up if "ST" not in _pool_name(row).upper())
+    st_limit_up = max(0, len(limit_up) - non_st_limit_up)
+    touched_limit_up_count = len(limit_up) + len(fire)
+    fail_rate = round(len(fire) / touched_limit_up_count * 100, 2) if touched_limit_up_count else None
+    promoted_count = sum(1 for row in limit_up if _row_lianban(row) >= 2)
+    promotion_rate = round(promoted_count / len(previous) * 100, 2) if previous else None
+    sealed_amount_billion = round(sum(_number(row.get("seal_amount")) for row in limit_up) / 100_000_000, 2)
+
+    return {
+        "as_of": _now_cst().isoformat(),
+        "trade_date": pool_date,
+        "limit_up_count": len(limit_up),
+        "limit_down_count": len(limit_down),
+        "touched_limit_up_count": touched_limit_up_count,
+        "failed_limit_up_count": len(fire),
+        "non_st_limit_up_count": non_st_limit_up,
+        "st_limit_up_count": st_limit_up,
+        "fail_rate": fail_rate,
+        "promotion_rate": promotion_rate,
+        "sealed_amount_billion": sealed_amount_billion,
+        "max_limit_up_height": ladder[0]["days"] if ladder else 0,
+        "limit_up_list": _fmt(limit_up, with_days=True),
+        "limit_down_list": _fmt(limit_down),
+        "failed_limit_up_list": _fmt(fire),
+        "limitup_ladder": ladder,
+    }
+
+
+def _load_capital() -> dict[str, Any] | None:
+    store = _market_store()
+    capital_date = (
+        store.latest_date("sector_capital_flow")
+        or store.latest_date("stock_capital_rank")
+        or store.latest_date("stock_capital_flow")
+    )
+    if not capital_date:
+        return None
+    sector_top5 = store.get_sector_capital(capital_date, limit=5)
+    stock_inflow = store.get_stock_capital_rank(capital_date, "inflow", limit=8)
+    stock_outflow = store.get_stock_capital_rank(capital_date, "outflow", limit=8)
+    return {
+        "as_of": _now_cst().isoformat(),
+        "trade_date": capital_date,
+        "sector_top5": sector_top5,
+        "stock_inflow_top": stock_inflow,
+        "stock_outflow_top": stock_outflow,
+        "north_recent": [],
+    }
+
+
+def _load_themes() -> dict[str, Any] | None:
+    store = _market_store()
+    theme_date = store.latest_date("sector_snapshot")
+    if not theme_date:
+        return None
+    concepts = store.get_sector_snapshot(theme_date, "concept", limit=40)
+    # 热力图取全部行业、按|涨跌幅|排序(大涨大跌都靠前),反映真实涨跌分布;不能只取涨幅TOP否则满屏红。
+    industries = store.get_sector_snapshot(theme_date, "industry", limit=200, order_by="abs")
+    source_rows = concepts or industries
+    if not source_rows:
+        return None
+    by_change = sorted(source_rows, key=lambda r: float(r.get("change_pct") or 0), reverse=True)
+    main_lines = [
+        {"name": r.get("name", ""), "change_pct": r.get("change_pct", 0), "leader": r.get("leader", "")}
+        for r in by_change[:3]
+    ]
+    observe = []
+    for r in by_change[3:15]:
+        spread = int(r.get("advancers") or 0) - int(r.get("decliners") or 0)
+        change = float(r.get("change_pct") or 0)
+        if -3 < change < 3 and spread >= 0:
+            observe.append({"name": r.get("name", ""), "change_pct": change, "leader": r.get("leader", "")})
+        if len(observe) >= 5:
+            break
+    return {
+        "as_of": _now_cst().isoformat(),
+        "trade_date": theme_date,
+        "concept_sectors": concepts,
+        "industry_sectors": industries,
+        "main_lines": main_lines,
+        "observe": observe,
+    }
+
+
 def register_market_dashboard_routes(
     app: FastAPI,
     require_auth: AuthDep | None = None,
@@ -1452,26 +1610,22 @@ def register_market_dashboard_routes(
             _run_source("capital", _load_capital),
             _run_source("themes", _load_themes),
             _run_source("pools", lambda: _load_pools(today)),
-            _run_source("recommendations", _load_recommendations),
-            _run_source("opportunities", _load_opportunities),
-            _run_source("news", _load_news),
-            _run_source("events", _load_events),
             _run_source("tracking", _load_tracking),
         )
         data = {name: payload for name, payload, _error in results}
         errors = [{"source": name, "message": error} for name, _payload, error in results if error]
 
-        recommendations = (data.get("recommendations") or {}).get("items", [])
-        opportunity_categories = (data.get("opportunities") or {}).get("categories", [])
+        recommendations: list[dict[str, Any]] = []
+        opportunity_categories: list[dict[str, Any]] = []
         opportunity_items = _flatten_opportunities(opportunity_categories)
-        tail_decisions = _build_tail_decisions(recommendations, opportunity_items)
+        tail_decisions: list[dict[str, Any]] = []
         market_overview = data.get("market_overview") or {}
         # Override estimated limit counts with real pool counts (no fake fallback).
         pools = data.get("pools")
         if market_overview.get("breadth"):
             market_overview["breadth"] = _apply_real_limits(market_overview["breadth"], pools)
-        news_items = (data.get("news") or {}).get("articles", [])
-        event_categories = (data.get("events") or {}).get("categories", [])
+        news_items: list[dict[str, Any]] = []
+        event_categories: list[dict[str, Any]] = []
         tracking = data.get("tracking") or {}
         capital = data.get("capital")
         themes = data.get("themes")
@@ -1521,27 +1675,37 @@ def register_market_dashboard_routes(
 
     @app.get("/market-dashboard/stages/{stage}", dependencies=[Depends(require_auth)])
     async def get_market_dashboard_stage(stage: str, request: Request) -> dict[str, Any]:
-        payload = await get_market_dashboard(request)
-        stage_map = {
-            "morning-brief": "morning_brief",
-            "intraday-monitor": "intraday_monitor",
-            "tail-strategy": "tail_strategy",
-            "close-review": "close_review",
-        }
-        key = stage_map.get(stage.strip().lower())
-        if key is None:
+        allowed = {"morning-brief", "intraday-monitor", "tail-strategy", "close-review"}
+        stage_key = stage.strip().lower()
+        if stage_key not in allowed:
             return {
                 "status": "error",
                 "error": "unknown stage",
-                "allowed": sorted(stage_map),
+                "allowed": sorted(allowed),
+            }
+        expected_trade_date = _close_review_visible_trade_date() if stage_key == "close-review" else None
+        snapshot = _market_store().get_market_stage_snapshot_fast(stage_key, expected_trade_date)
+        if not snapshot:
+            return {
+                "status": "ok",
+                "stage": stage_key,
+                "date": expected_trade_date,
+                "updated_at": None,
+                "data": {
+                    "data_status": "missing",
+                    "missing_tables": ["market_stage_snapshot"],
+                    "source_policy": "db_only",
+                    "expected_trade_date": expected_trade_date,
+                },
+                "errors": [{"source": "market_stage_snapshot", "message": "stage snapshot not synced"}],
             }
         return {
             "status": "ok",
-            "stage": stage,
-            "date": payload.get("date"),
-            "updated_at": payload.get("updated_at"),
-            "data": payload.get(key) or {},
-            "errors": payload.get("errors", []),
+            "stage": stage_key,
+            "date": snapshot.get("trade_date"),
+            "updated_at": snapshot.get("updated_at"),
+            "data": _stage_payload_with_freshness(stage_key, snapshot),
+            "errors": [],
         }
 
     @app.get("/market-dashboard/bars/{code}", dependencies=[Depends(require_auth)])

@@ -460,8 +460,8 @@ export const api = {
   alphaForgeEventsUrl: (runId: string) => withAuthQuery(`${BASE}/alpha-forge/runs/${encodeURIComponent(runId)}/events`),
 
   // Fund arbitrage
-  scanFunds: (type = "ETF", minPremium = 0.5, limit = 50) =>
-    request<FundScanResponse>(`/fund/scan?type=${encodeURIComponent(type)}&min_premium=${minPremium}&limit=${limit}`),
+  scanFunds: (type = "ETF", minPremium = 0.5, page = 1, pageSize = 20, sort = "premium_abs") =>
+    request<FundScanResponse>(`/fund/scan?type=${encodeURIComponent(type)}&min_premium=${minPremium}&page=${page}&page_size=${pageSize}&sort=${sort}`),
   getFundDetail: (code: string) => request<FundDetail>(`/fund/${encodeURIComponent(code)}`),
   getFundSourceStatus: () => request<FundSourceStatus>("/fund/source-status"),
   analyzeFund: (fund_code: string, fund_type = "ETF") =>
@@ -1538,6 +1538,7 @@ export interface MarketIndexRow {
   name: string;
   price: number;
   change_pct: number;
+  trade_date?: string;
 }
 
 export interface MarketBreadth {
@@ -1563,6 +1564,7 @@ export interface MarketOverview {
 export interface MarketSectorRow {
   name: string;
   change_pct: number;
+  turnover?: number;
   advancers?: number;
   decliners?: number;
   leader?: string;
@@ -1594,9 +1596,17 @@ export interface MarketPools {
   trade_date: string;
   limit_up_count: number;
   limit_down_count: number;
+  touched_limit_up_count?: number | null;
+  failed_limit_up_count?: number | null;
+  non_st_limit_up_count?: number | null;
+  st_limit_up_count?: number | null;
+  fail_rate?: number | null;
+  promotion_rate?: number | null;
+  sealed_amount_billion?: number | null;
   max_limit_up_height: number;
   limit_up_list: { symbol: string; name: string; days: number }[];
   limit_down_list: { symbol: string; name: string; days: number }[];
+  failed_limit_up_list?: { symbol: string; name: string; days: number }[];
   limitup_ladder: LadderRung[];
 }
 
@@ -1620,7 +1630,9 @@ export interface MarketEnvironment {
 
 export interface MarketThemes {
   as_of?: string;
+  trade_date?: string;
   concept_sectors: MarketSectorRow[];
+  industry_sectors?: MarketSectorRow[];
   main_lines: { name: string; change_pct: number; leader: string }[];
   observe: { name: string; change_pct: number; leader: string }[];
 }
@@ -1929,11 +1941,28 @@ export interface FundScanItem {
   subscribe_status: string;
   trade_date: string;
   signal: string;
+  updated_at?: string;
+  // Derived enrichment (computed by /fund/scan)
+  iopv?: number | null;
+  nav_date?: string;
+  direction?: string;          // 申购套利 / 赎回套利
+  net_return?: number;         // |premium| - cost, clamped ≥ 0
+  settle_days?: number;        // T+N by fund type
+  is_stale_nav?: boolean;      // NAV date != snapshot date
+  can_trade?: boolean;         // false if 申赎 suspended
+  premium_percentile?: number | null;  // only when ≥20 days history
+  amount_percentile?: number | null;
 }
 
 export interface FundScanResponse {
   status: string;
-  count: number;
+  source: "snapshot" | "live";
+  trade_date: string | null;
+  updated_at: string | null;
+  count: number;        // total filtered rows (across all pages)
+  page: number;
+  page_size: number;
+  total_pages: number;
   items: FundScanItem[];
 }
 
