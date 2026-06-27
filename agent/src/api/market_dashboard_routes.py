@@ -1558,7 +1558,8 @@ def _load_themes() -> dict[str, Any] | None:
     if not theme_date:
         return None
     concepts = store.get_sector_snapshot(theme_date, "concept", limit=40)
-    industries = store.get_sector_snapshot(theme_date, "industry", limit=20)
+    # 热力图取全部行业、按|涨跌幅|排序(大涨大跌都靠前),反映真实涨跌分布;不能只取涨幅TOP否则满屏红。
+    industries = store.get_sector_snapshot(theme_date, "industry", limit=200, order_by="abs")
     source_rows = concepts or industries
     if not source_rows:
         return None

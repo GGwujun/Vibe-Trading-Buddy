@@ -92,6 +92,13 @@ CREATE TABLE IF NOT EXISTS security_master (
 CREATE INDEX IF NOT EXISTS idx_security_master_status ON security_master(list_status);
 CREATE INDEX IF NOT EXISTS idx_security_master_flags ON security_master(is_active, is_st, is_delisting, is_bj);
 
+CREATE TABLE IF NOT EXISTS trade_calendar (
+    trade_date TEXT PRIMARY KEY,
+    is_trading INTEGER NOT NULL,
+    market TEXT NOT NULL DEFAULT 'CN',
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS stock_daily_basic (
     code TEXT NOT NULL, trade_date TEXT NOT NULL,
     close REAL, turnover_rate REAL, turnover_rate_f REAL, volume_ratio REAL,
@@ -115,6 +122,16 @@ CREATE TABLE IF NOT EXISTS etf_master (
 );
 CREATE INDEX IF NOT EXISTS idx_etf_master_status ON etf_master(list_status);
 
+CREATE TABLE IF NOT EXISTS fund_daily (
+    code TEXT NOT NULL, trade_date TEXT NOT NULL,
+    open REAL, high REAL, low REAL, close REAL,
+    volume REAL, total_amt REAL, rise REAL, rise_rate REAL,
+    nav REAL, iopv REAL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (code, trade_date)
+);
+CREATE INDEX IF NOT EXISTS idx_fund_daily_date ON fund_daily(trade_date);
+
 CREATE TABLE IF NOT EXISTS etf_daily (
     code TEXT NOT NULL, trade_date TEXT NOT NULL,
     open REAL, high REAL, low REAL, close REAL,
@@ -132,6 +149,14 @@ CREATE TABLE IF NOT EXISTS etf_share_size (
 );
 CREATE INDEX IF NOT EXISTS idx_etf_share_size_date ON etf_share_size(trade_date);
 
+CREATE TABLE IF NOT EXISTS index_master (
+    code TEXT PRIMARY KEY,
+    name TEXT,
+    type TEXT,
+    req_code TEXT,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS index_daily (
     code TEXT NOT NULL, trade_date TEXT NOT NULL,
     open REAL, high REAL, low REAL, close REAL, pre_close REAL,
@@ -140,6 +165,57 @@ CREATE TABLE IF NOT EXISTS index_daily (
     PRIMARY KEY (code, trade_date)
 );
 CREATE INDEX IF NOT EXISTS idx_index_daily_date ON index_daily(trade_date);
+
+CREATE TABLE IF NOT EXISTS board_master (
+    code TEXT PRIMARY KEY,
+    name TEXT,
+    board_type TEXT,
+    req_code TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_board_master_type ON board_master(board_type);
+
+CREATE TABLE IF NOT EXISTS board_members (
+    board_code TEXT NOT NULL,
+    board_type TEXT,
+    stock_code TEXT NOT NULL,
+    stock_name TEXT,
+    stock_exchange TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (board_code, stock_code)
+);
+CREATE INDEX IF NOT EXISTS idx_board_members_stock ON board_members(stock_code);
+
+CREATE TABLE IF NOT EXISTS board_daily (
+    board_code TEXT NOT NULL, trade_date TEXT NOT NULL,
+    name TEXT, board_type TEXT,
+    open REAL, high REAL, low REAL, close REAL,
+    volume REAL, total_amt REAL, rise REAL, rise_rate REAL, turnover_rate REAL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (board_code, trade_date)
+);
+CREATE INDEX IF NOT EXISTS idx_board_daily_date_type ON board_daily(trade_date, board_type);
+
+CREATE TABLE IF NOT EXISTS realtime_quote_snapshot (
+    trade_date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    snapshot_at TEXT,
+    name TEXT,
+    price REAL,
+    pre_close REAL,
+    open REAL,
+    high REAL,
+    low REAL,
+    volume REAL,
+    total_amt REAL,
+    rise REAL,
+    rise_rate REAL,
+    turnover_rate REAL,
+    source TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (trade_date, code)
+);
+CREATE INDEX IF NOT EXISTS idx_realtime_quote_snapshot_at ON realtime_quote_snapshot(snapshot_at);
 
 CREATE TABLE IF NOT EXISTS fund_premium_snapshot (
     code TEXT NOT NULL, trade_date TEXT NOT NULL,
@@ -268,9 +344,13 @@ CREATE TABLE IF NOT EXISTS sync_meta (
 
 # Tables that carry a per-(date) market-wide snapshot.
 _DATE_KEYED_TABLES = {
+    "trade_calendar": ("trade_date",),
     "dragon_tiger": ("trade_date",),
     "stock_pool": ("trade_date",),
+    "fund_daily": ("trade_date",),
     "fund_premium_snapshot": ("trade_date",),
+    "board_daily": ("trade_date",),
+    "realtime_quote_snapshot": ("trade_date",),
     "stock_capital_rank": ("trade_date",),
     "sector_capital_flow": ("trade_date",),
     "sector_snapshot": ("trade_date",),
@@ -537,6 +617,111 @@ class MarketStore:
         ).fetchall()
         return [r["code"] for r in rows]
 
+    # ------------------------------------------------------------------
+    # Trading calendar
+    # ------------------------------------------------------------------
+
+    @_synchronized
+    def upsert_trade_calendar(self, rows: list[dict], *, market: str = "CN") -> int:
+        if not rows:
+            return 0
+        payload = []
+        for r in rows:
+            trade_date = r.get("trade_date") or r.get("date")
+            if not trade_date:
+                continue
+            payload.append(
+                (
+                    trade_date,
+                    1 if r.get("is_trading") else 0,
+                    r.get("market") or market,
+                    _now_iso(),
+                )
+            )
+        if not payload:
+            return 0
+        return self._executemany_chunked(
+            "INSERT OR REPLACE INTO trade_calendar "
+            "(trade_date, is_trading, market, updated_at) VALUES (?, ?, ?, ?)",
+            payload,
+        )
+
+    @_synchronized
+    def is_calendar_trading_day(self, trade_date: str, *, market: str = "CN") -> bool | None:
+        row = self._conn.execute(
+            "SELECT is_trading FROM trade_calendar WHERE trade_date = ? AND market = ?",
+            (trade_date, market),
+        ).fetchone()
+        if row is None:
+            return None
+        return bool(row["is_trading"])
+
+    @_synchronized
+    def trade_calendar_range(self, *, market: str = "CN") -> tuple[Optional[str], Optional[str]]:
+        row = self._conn.execute(
+            "SELECT MIN(trade_date) AS lo, MAX(trade_date) AS hi "
+            "FROM trade_calendar WHERE market = ?",
+            (market,),
+        ).fetchone()
+        if not row or not row["lo"]:
+            return (None, None)
+        return (row["lo"], row["hi"])
+
+    # ------------------------------------------------------------------
+    # Realtime quote snapshots (intraday)
+    # ------------------------------------------------------------------
+
+    @_synchronized
+    def upsert_realtime_quotes(
+        self, trade_date: str, rows: list[dict], *, snapshot_at: str | None = None
+    ) -> int:
+        if not rows:
+            return 0
+        payload = []
+        for r in rows:
+            code = str(r.get("code") or r.get("symbol") or "").upper()
+            if not code:
+                continue
+            payload.append(
+                (
+                    r.get("trade_date") or trade_date,
+                    code,
+                    r.get("snapshot_at") or snapshot_at or _now_iso(),
+                    r.get("name"),
+                    _f(r.get("price") or r.get("close")),
+                    _f(r.get("pre_close") or r.get("yt_close")),
+                    _f(r.get("open")),
+                    _f(r.get("high")),
+                    _f(r.get("low")),
+                    _f(r.get("volume")),
+                    _f(r.get("total_amt") or r.get("amount")),
+                    _f(r.get("rise") or r.get("change")),
+                    _f(r.get("rise_rate") or r.get("change_pct") or r.get("pct_chg")),
+                    _f(r.get("turnover_rate") or r.get("t_rate")),
+                    r.get("source"),
+                    _now_iso(),
+                )
+            )
+        if not payload:
+            return 0
+        return self._executemany_chunked(
+            "INSERT OR REPLACE INTO realtime_quote_snapshot "
+            "(trade_date, code, snapshot_at, name, price, pre_close, open, high, low, "
+            "volume, total_amt, rise, rise_rate, turnover_rate, source, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            payload,
+        )
+
+    @_synchronized
+    def get_realtime_quotes(self, trade_date: str, limit: int = 5000) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT trade_date, code, snapshot_at, name, price, pre_close, open, high, low, "
+            "volume, total_amt, rise, rise_rate, turnover_rate, source, updated_at "
+            "FROM realtime_quote_snapshot WHERE trade_date = ? ORDER BY code LIMIT ?",
+            (trade_date, int(limit)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     @_synchronized
     def market_coverage(self) -> dict[str, Any]:
         """Return high-level local-data coverage for operator/status views."""
@@ -563,15 +748,26 @@ class MarketStore:
             ),
             "stock_daily_basic_rows": "SELECT COUNT(*) FROM stock_daily_basic",
             "stock_daily_basic_codes": "SELECT COUNT(DISTINCT code) FROM stock_daily_basic",
+            "trade_calendar_rows": "SELECT COUNT(*) FROM trade_calendar",
+            "realtime_quote_rows": "SELECT COUNT(*) FROM realtime_quote_snapshot",
+            "realtime_quote_codes": "SELECT COUNT(DISTINCT code) FROM realtime_quote_snapshot",
             "etf_master_rows": "SELECT COUNT(*) FROM etf_master",
+            "fund_master_rows": "SELECT COUNT(*) FROM fund_master",
+            "fund_daily_rows": "SELECT COUNT(*) FROM fund_daily",
+            "fund_daily_codes": "SELECT COUNT(DISTINCT code) FROM fund_daily",
             "fund_premium_rows": "SELECT COUNT(*) FROM fund_premium_snapshot",
             "fund_premium_codes": "SELECT COUNT(DISTINCT code) FROM fund_premium_snapshot",
             "etf_daily_rows": "SELECT COUNT(*) FROM etf_daily",
             "etf_daily_codes": "SELECT COUNT(DISTINCT code) FROM etf_daily",
             "etf_share_size_rows": "SELECT COUNT(*) FROM etf_share_size",
             "etf_share_size_codes": "SELECT COUNT(DISTINCT code) FROM etf_share_size",
+            "index_master_rows": "SELECT COUNT(*) FROM index_master",
             "index_daily_rows": "SELECT COUNT(*) FROM index_daily",
             "index_daily_codes": "SELECT COUNT(DISTINCT code) FROM index_daily",
+            "board_master_rows": "SELECT COUNT(*) FROM board_master",
+            "board_members_rows": "SELECT COUNT(*) FROM board_members",
+            "board_daily_rows": "SELECT COUNT(*) FROM board_daily",
+            "board_daily_codes": "SELECT COUNT(DISTINCT board_code) FROM board_daily",
             "dragon_tiger_rows": "SELECT COUNT(*) FROM dragon_tiger",
             "stock_capital_flow_rows": "SELECT COUNT(*) FROM stock_capital_flow",
             "stock_capital_rank_rows": "SELECT COUNT(*) FROM stock_capital_rank",
@@ -593,13 +789,21 @@ class MarketStore:
         )
         ranges: dict[str, list[str | None]] = {}
         for table in (
+            "trade_calendar",
             "security_master",
             "bars_daily",
             "stock_daily_basic",
             "etf_master",
+            "fund_master",
+            "fund_daily",
             "etf_daily",
             "etf_share_size",
+            "index_master",
             "index_daily",
+            "board_master",
+            "board_members",
+            "board_daily",
+            "realtime_quote_snapshot",
             "fund_premium_snapshot",
             "dragon_tiger",
             "stock_capital_flow",
@@ -795,6 +999,58 @@ class MarketStore:
         )
 
     @_synchronized
+    def upsert_fund_daily(self, code: str, rows: list[dict]) -> int:
+        if not rows:
+            return 0
+        payload = []
+        for r in rows:
+            trade_date = r.get("date") or r.get("trade_date")
+            if not trade_date:
+                continue
+            payload.append(
+                (
+                    code,
+                    trade_date,
+                    _f(r.get("open")),
+                    _f(r.get("high")),
+                    _f(r.get("low")),
+                    _f(r.get("close") or r.get("price")),
+                    _f(r.get("volume")),
+                    _f(r.get("total_amt") or r.get("amount")),
+                    _f(r.get("rise") or r.get("change")),
+                    _f(r.get("rise_rate") or r.get("change_pct") or r.get("pct_chg")),
+                    _f(r.get("nav")),
+                    _f(r.get("iopv")),
+                    _now_iso(),
+                )
+            )
+        if not payload:
+            return 0
+        return self._executemany_chunked(
+            "INSERT OR REPLACE INTO fund_daily "
+            "(code, trade_date, open, high, low, close, volume, total_amt, rise, rise_rate, nav, iopv, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            payload,
+        )
+
+    @_synchronized
+    def get_fund_daily(self, code: str, *, start: str | None = None, end: str | None = None) -> list[dict]:
+        clauses = ["code = ?"]
+        params: list[Any] = [code]
+        if start:
+            clauses.append("trade_date >= ?")
+            params.append(start)
+        if end:
+            clauses.append("trade_date <= ?")
+            params.append(end)
+        rows = self._conn.execute(
+            "SELECT code, trade_date, open, high, low, close, volume, total_amt, rise, rise_rate, nav, iopv "
+            f"FROM fund_daily WHERE {' AND '.join(clauses)} ORDER BY trade_date",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    @_synchronized
     def upsert_etf_daily(self, code: str, rows: list[dict]) -> int:
         if not rows:
             return 0
@@ -859,6 +1115,159 @@ class MarketStore:
             (code, trade_date),
         ).fetchone()
         return row is not None
+
+    @_synchronized
+    def count_index_daily(self, code: str) -> int:
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM index_daily WHERE code = ?", (code,)
+        ).fetchone()[0]
+
+    # ------------------------------------------------------------------
+    # Index and board master / board daily
+    # ------------------------------------------------------------------
+
+    @_synchronized
+    def upsert_index_master(self, rows: list[dict]) -> int:
+        if not rows:
+            return 0
+        payload = []
+        for r in rows:
+            code = str(r.get("code") or r.get("req_code") or "").upper()
+            if not code:
+                continue
+            payload.append(
+                (
+                    code,
+                    r.get("name"),
+                    r.get("type"),
+                    r.get("req_code"),
+                    _now_iso(),
+                )
+            )
+        if not payload:
+            return 0
+        return self._executemany_chunked(
+            "INSERT OR REPLACE INTO index_master (code, name, type, req_code, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            payload,
+        )
+
+    @_synchronized
+    def list_index_master(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT code, name, type, req_code, updated_at FROM index_master ORDER BY code"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    @_synchronized
+    def upsert_board_master(self, rows: list[dict]) -> int:
+        if not rows:
+            return 0
+        payload = []
+        for r in rows:
+            code = str(r.get("code") or r.get("req_code") or "").strip()
+            if not code:
+                continue
+            board_type = r.get("board_type") or r.get("type")
+            req_code = r.get("req_code") or (
+                f"{board_type}.{code}" if board_type and "." not in code else code
+            )
+            payload.append((code, r.get("name"), board_type, req_code, _now_iso()))
+        if not payload:
+            return 0
+        return self._executemany_chunked(
+            "INSERT OR REPLACE INTO board_master (code, name, board_type, req_code, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            payload,
+        )
+
+    @_synchronized
+    def list_board_master(self, board_type: str | None = None) -> list[dict]:
+        sql = "SELECT code, name, board_type, req_code, updated_at FROM board_master"
+        params: list[Any] = []
+        if board_type:
+            sql += " WHERE board_type = ?"
+            params.append(board_type)
+        sql += " ORDER BY board_type, code"
+        return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
+
+    @_synchronized
+    def upsert_board_members(self, board_code: str, board_type: str, rows: list[dict]) -> int:
+        if not rows:
+            return 0
+        payload = []
+        for r in rows:
+            stock_code = str(r.get("code") or r.get("stock_code") or r.get("req_code") or "").upper()
+            if not stock_code:
+                continue
+            payload.append(
+                (
+                    board_code,
+                    board_type,
+                    stock_code,
+                    r.get("name") or r.get("stock_name"),
+                    r.get("type") or r.get("stock_exchange"),
+                    _now_iso(),
+                )
+            )
+        if not payload:
+            return 0
+        with self._write_transaction():
+            self._conn.execute("DELETE FROM board_members WHERE board_code = ?", (board_code,))
+            for i in range(0, len(payload), _BATCH):
+                self._conn.executemany(
+                    "INSERT OR REPLACE INTO board_members "
+                    "(board_code, board_type, stock_code, stock_name, stock_exchange, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    payload[i : i + _BATCH],
+                )
+        return len(payload)
+
+    @_synchronized
+    def get_board_members(self, board_code: str) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT board_code, board_type, stock_code, stock_name, stock_exchange "
+            "FROM board_members WHERE board_code = ? ORDER BY stock_code",
+            (board_code,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    @_synchronized
+    def upsert_board_daily(self, board_code: str, rows: list[dict]) -> int:
+        if not rows:
+            return 0
+        payload = []
+        for r in rows:
+            trade_date = r.get("date") or r.get("trade_date")
+            if not trade_date:
+                continue
+            payload.append(
+                (
+                    board_code,
+                    trade_date,
+                    r.get("name"),
+                    r.get("board_type") or r.get("type"),
+                    _f(r.get("open")),
+                    _f(r.get("high")),
+                    _f(r.get("low")),
+                    _f(r.get("close") or r.get("price")),
+                    _f(r.get("volume")),
+                    _f(r.get("total_amt") or r.get("amount")),
+                    _f(r.get("rise") or r.get("change")),
+                    _f(r.get("rise_rate") or r.get("change_pct") or r.get("pct_chg")),
+                    _f(r.get("turnover_rate") or r.get("t_rate")),
+                    _now_iso(),
+                )
+            )
+        if not payload:
+            return 0
+        return self._executemany_chunked(
+            "INSERT OR REPLACE INTO board_daily "
+            "(board_code, trade_date, name, board_type, open, high, low, close, volume, "
+            "total_amt, rise, rise_rate, turnover_rate, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            payload,
+        )
 
     @_synchronized
     def upsert_etf_share_size(self, rows: list[dict]) -> int:
@@ -1115,11 +1524,12 @@ class MarketStore:
                 k: v for k, v in r.items()
                 if k not in {"trade_date", "date", "board_type", "name", "sector", "change_pct", "advancers", "decliners", "leader"}
             }
+            chg = _f(r.get("change_pct"))
             payload.append((
                 trade_date,
                 board_type,
                 name,
-                _f(r.get("change_pct")),
+                round(chg, 2) if chg is not None else None,
                 int(_f(r.get("advancers")) or 0),
                 int(_f(r.get("decliners")) or 0),
                 r.get("leader"),
@@ -1143,11 +1553,19 @@ class MarketStore:
         return len(payload)
 
     @_synchronized
-    def get_sector_snapshot(self, trade_date: str, board_type: str, limit: int = 40) -> list[dict]:
+    def get_sector_snapshot(
+        self, trade_date: str, board_type: str, limit: int = 40, *, order_by: str = "change_pct_desc"
+    ) -> list[dict]:
+        # order_by: change_pct_desc(默认,涨幅TOP) | abs(按|涨跌幅|,大涨大跌都靠前,适合热力图) | name
+        order = {
+            "change_pct_desc": "change_pct DESC",
+            "abs": "ABS(change_pct) DESC",
+            "name": "name",
+        }.get(order_by, "change_pct DESC")
         rows = self._conn.execute(
-            "SELECT name, change_pct, advancers, decliners, leader, extra_json "
-            "FROM sector_snapshot WHERE trade_date = ? AND board_type = ? "
-            "ORDER BY change_pct DESC LIMIT ?",
+            f"SELECT name, change_pct, advancers, decliners, leader, extra_json "
+            f"FROM sector_snapshot WHERE trade_date = ? AND board_type = ? "
+            f"ORDER BY {order} LIMIT ?",
             (trade_date, board_type, int(limit)),
         ).fetchall()
         return _rows_with_extra(rows)
@@ -1722,13 +2140,21 @@ class MarketStore:
     def table_counts(self) -> dict[str, int]:
         out: dict[str, int] = {}
         for t in (
+            "trade_calendar",
             "security_master",
             "bars_daily",
             "stock_daily_basic",
             "etf_master",
+            "fund_master",
+            "fund_daily",
             "etf_daily",
             "etf_share_size",
+            "index_master",
             "index_daily",
+            "board_master",
+            "board_members",
+            "board_daily",
+            "realtime_quote_snapshot",
             "fund_premium_snapshot",
             "dragon_tiger",
             "stock_capital_flow",
@@ -1749,13 +2175,21 @@ class MarketStore:
     @_synchronized
     def date_range(self, table: str) -> tuple[Optional[str], Optional[str]]:
         if table not in {
+            "trade_calendar",
             "security_master",
             "bars_daily",
             "stock_daily_basic",
             "etf_master",
+            "fund_master",
+            "fund_daily",
             "etf_daily",
             "etf_share_size",
+            "index_master",
             "index_daily",
+            "board_master",
+            "board_members",
+            "board_daily",
+            "realtime_quote_snapshot",
             "fund_premium_snapshot",
             "dragon_tiger",
             "stock_capital_flow",
@@ -1776,6 +2210,13 @@ class MarketStore:
                 date_col = "list_date"
             row = self._conn.execute(
                 f"SELECT MIN({date_col}) AS lo, MAX({date_col}) AS hi FROM {table}"
+            ).fetchone()
+            if not row or not row["lo"]:
+                return (None, None)
+            return (row["lo"], row["hi"])
+        if table in {"fund_master", "index_master", "board_master", "board_members"}:
+            row = self._conn.execute(
+                f"SELECT MIN(updated_at) AS lo, MAX(updated_at) AS hi FROM {table}"
             ).fetchone()
             if not row or not row["lo"]:
                 return (None, None)

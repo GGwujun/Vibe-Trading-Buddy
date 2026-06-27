@@ -1630,6 +1630,7 @@ export interface MarketEnvironment {
 
 export interface MarketThemes {
   as_of?: string;
+  trade_date?: string;
   concept_sectors: MarketSectorRow[];
   industry_sectors?: MarketSectorRow[];
   main_lines: { name: string; change_pct: number; leader: string }[];

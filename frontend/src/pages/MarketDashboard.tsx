@@ -44,7 +44,7 @@ function num(value: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function pct(value: unknown, digits = 1): string {
+function pct(value: unknown, digits = 2): string {
   const n = num(value);
   if (n === null) return "-";
   return `${n > 0 ? "+" : ""}${n.toFixed(digits)}%`;
@@ -594,7 +594,11 @@ function MultiPeriodTable({ rows }: { rows?: MultiPeriodRow[] }) {
 function ThemeHeatmapBlock({ themes }: { themes?: MarketThemes | null }) {
   // 优先行业板块（语义干净），概念板块里混入"昨日涨停/打板"等机械分类，仅作回退。
   const sectors = themes?.industry_sectors ?? themes?.concept_sectors ?? [];
-  const option = useMemo<EChartsOption>(() => ({
+  const option = useMemo<EChartsOption>(() => {
+    // 等面积 + 全部行业：每格大小相同、画全部板块，红绿比例=真实涨跌分布。
+    // 按涨跌幅降序排列，让红(涨)绿(跌)自然分簇，大跌日直观看到大片绿。
+    const sorted = [...sectors].sort((a, b) => (b.change_pct ?? 0) - (a.change_pct ?? 0));
+    return {
     tooltip: { formatter: (p: any) => `${p?.name ?? ""}<br/>${pct(p?.data?.change_pct, 2)}` },
     series: [
       {
@@ -602,20 +606,20 @@ function ThemeHeatmapBlock({ themes }: { themes?: MarketThemes | null }) {
         roam: false,
         nodeClick: false,
         breadcrumb: { show: false },
-        label: { color: "#fff", fontSize: 12, fontWeight: 600 },
-        data: sectors.slice(0, 24).map((s) => ({
+        label: { color: "#fff", fontSize: 10, fontWeight: 600, overflow: "truncate", width: 60 },
+        data: sorted.map((s) => ({
           name: s.name,
-          // 面积=成交额（热度），与涨跌解耦；旧数据无 turnover 时回退到成分股数，绝不用涨跌幅——否则红格被放大、绿格被挤没。
-          value: Math.max(1, s.turnover ?? (s.advancers ?? 0) + (s.decliners ?? 0)),
+          value: 1, // 等面积
           change_pct: s.change_pct,
           itemStyle: { color: pctBg(s.change_pct) },
         })),
       },
     ],
-  }), [sectors]);
+    };
+  }, [sectors]);
 
   return (
-    <DashboardSection title="行业热力图" sub="面积=热度 · 颜色=涨跌" icon={<Activity className="h-5 w-5 text-amber-500" />}>
+    <DashboardSection title="行业热力图" sub="颜色=涨跌（红涨绿跌）" icon={<Activity className="h-5 w-5 text-amber-500" />}>
       {sectors.length ? <Chart option={option} height={360} /> : <EmptyHint>行业热力图未同步</EmptyHint>}
     </DashboardSection>
   );
