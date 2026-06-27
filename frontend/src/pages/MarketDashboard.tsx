@@ -227,12 +227,14 @@ function MarketEnvironmentBlock({ data }: { data: MarketDashboardResponse }) {
   const adv = breadth?.advancers ?? 0;
   const dec = breadth?.decliners ?? 0;
   const total = Math.max(adv + dec + (breadth?.flat ?? 0), 1);
+  // 最新交易日基准：板块快照覆盖到的最新一天。指数日期落后于此即"数据滞后"。
+  const latestDate = data.themes?.trade_date;
 
   return (
     <DashboardSection title="盘型 / 环境" sub="A股 + 海外" icon={<Layers3 className="h-5 w-5 text-amber-500" />}>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         {INDEX_OPTIONS.map((item) => (
-          <IndexMiniCard key={item.symbol} meta={item} row={indexMap.get(item.symbol)} />
+          <IndexMiniCard key={item.symbol} meta={item} row={indexMap.get(item.symbol)} latestDate={latestDate} />
         ))}
       </div>
       <div className="mt-3 rounded-md border bg-muted/20 px-3 py-3">
@@ -253,7 +255,9 @@ function MarketEnvironmentBlock({ data }: { data: MarketDashboardResponse }) {
   );
 }
 
-function IndexMiniCard({ meta, row }: { meta: { symbol: string; name: string }; row?: MarketIndexRow }) {
+function IndexMiniCard({ meta, row, latestDate }: { meta: { symbol: string; name: string }; row?: MarketIndexRow; latestDate?: string }) {
+  // 指数日期落后于最新交易日 → 数据源抽风导致缺最新日，静默回退到了旧值，必须标出来。
+  const stale = !!latestDate && !!row?.trade_date && row.trade_date < latestDate;
   const [bars, setBars] = useState<MarketBarsResponse | null>(null);
   useEffect(() => {
     let cancelled = false;

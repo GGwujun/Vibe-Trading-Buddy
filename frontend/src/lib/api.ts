@@ -1538,6 +1538,7 @@ export interface MarketIndexRow {
   name: string;
   price: number;
   change_pct: number;
+  trade_date?: string;
 }
 
 export interface MarketBreadth {

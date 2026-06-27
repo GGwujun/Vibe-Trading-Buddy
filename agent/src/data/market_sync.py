@@ -1031,44 +1031,97 @@ def _sync_index_daily_akshare_missing(
     *,
     index_codes: Optional[list[str]] = None,
 ) -> int:
+    """Backfill any default index still missing `trade_date`.
+
+    Two-pronged fallback when tushare daily left gaps:
+    1. 北证50 (899050.BJ) — via its own daily endpoint (only reliable source).
+    2. The rest — via the realtime spot endpoint ``stock_zh_index_spot_em``.
+       On a non-trading day (weekend/holiday) spot returns the last trading
+       day's frozen close, which equals `trade_date`'s settle, so it is safe
+       to stamp with `trade_date`. open/high/low are unavailable from spot and
+       left None (the dashboard only reads close + pct_chg).
+    """
     codes = index_codes or list(_DEFAULT_INDEX_CODES)
-    if "899050.BJ" not in codes:
+    if not codes:
         return 0
-    try:
-        import akshare as ak
-        df = ak.stock_zh_index_daily(symbol="bj899050")
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("akshare bj899050 index daily failed for %s: %s", trade_date, exc)
+
+    # Skip codes that already have this trade_date — never overwrite good data.
+    missing = [c for c in codes if not store.has_index_daily(c, trade_date)]
+    if not missing:
         return 0
-    if df is None or df.empty:
-        return 0
-    rows = []
-    working = df.copy()
-    working["date"] = working["date"].astype(str)
-    working = working[working["date"] <= trade_date]
-    if working.empty:
-        return 0
-    latest = working.tail(2)
-    prev_close = None
-    if len(latest) >= 2:
-        prev_close = _num(latest.iloc[0].get("close"))
-    row = latest.iloc[-1]
-    close = _num(row.get("close"))
-    change = close - prev_close if prev_close else None
-    pct_chg = (change / prev_close * 100) if prev_close else None
-    rows.append({
-        "code": "899050.BJ",
-        "trade_date": str(row.get("date")),
-        "open": row.get("open"),
-        "high": row.get("high"),
-        "low": row.get("low"),
-        "close": close,
-        "pre_close": prev_close,
-        "change": change,
-        "pct_chg": pct_chg,
-        "volume": row.get("volume"),
-    })
-    return store.upsert_index_daily("899050.BJ", rows)
+
+    import akshare as ak
+
+    written = 0
+
+    # --- 北证50: dedicated daily endpoint (spot list omits it) ---
+    if "899050.BJ" in missing:
+        try:
+            df = ak.stock_zh_index_daily(symbol="bj899050")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("akshare bj899050 index daily failed for %s: %s", trade_date, exc)
+            df = None
+        if df is not None and not df.empty:
+            working = df.copy()
+            working["date"] = working["date"].astype(str)
+            working = working[working["date"] <= trade_date]
+            if not working.empty:
+                latest = working.tail(2)
+                prev_close = _num(latest.iloc[0].get("close")) if len(latest) >= 2 else None
+                row = latest.iloc[-1]
+                close = _num(row.get("close"))
+                change = close - prev_close if prev_close else None
+                pct_chg = (change / prev_close * 100) if prev_close else None
+                written += store.upsert_index_daily("899050.BJ", [{
+                    "code": "899050.BJ",
+                    "trade_date": str(row.get("date")),
+                    "open": row.get("open"),
+                    "high": row.get("high"),
+                    "low": row.get("low"),
+                    "close": close,
+                    "pre_close": prev_close,
+                    "change": change,
+                    "pct_chg": pct_chg,
+                    "volume": row.get("volume"),
+                }])
+
+    # --- the rest: realtime spot (frozen close = trade_date settle on holidays) ---
+    spot_codes = [c for c in missing if c != "899050.BJ"]
+    if spot_codes:
+        # index_daily code -> akshare spot 代码 (前6位)
+        want = {c.replace(".SH", "").replace(".SZ", "").replace(".BJ", ""): c for c in spot_codes}
+        try:
+            df = ak.stock_zh_index_spot_em(symbol="沪深重要指数")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("akshare index spot failed for %s: %s", trade_date, exc)
+            df = None
+        if df is not None and not df.empty:
+            cols = list(df.columns)
+            code_col = "代码" if "代码" in cols else cols[0]
+            close_col = next((c for c in cols if "最新价" in c), None)
+            pct_col = next((c for c in cols if "涨跌幅" in c), None)
+            if code_col and close_col:
+                rows_by_code: dict[str, dict] = {}
+                for _, r in df.iterrows():
+                    ak_code = str(r[code_col]).strip()
+                    idx_code = want.get(ak_code)
+                    if not idx_code:
+                        continue
+                    close = _num(r[close_col])
+                    if not close:
+                        continue
+                    rows_by_code[idx_code] = {
+                        "code": idx_code,
+                        "trade_date": trade_date,
+                        "open": None, "high": None, "low": None,
+                        "close": close,
+                        "pre_close": None, "change": None,
+                        "pct_chg": _num(r[pct_col]) if pct_col else None,
+                        "volume": None,
+                    }
+                for idx_code, row in rows_by_code.items():
+                    written += store.upsert_index_daily(idx_code, [row])
+    return written
 
 
 def _sync_index_daily(

@@ -853,6 +853,14 @@ class MarketStore:
         return row is not None
 
     @_synchronized
+    def has_index_daily(self, code: str, trade_date: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM index_daily WHERE code = ? AND trade_date = ? LIMIT 1",
+            (code, trade_date),
+        ).fetchone()
+        return row is not None
+
+    @_synchronized
     def upsert_etf_share_size(self, rows: list[dict]) -> int:
         """Upsert ETF share/size snapshots."""
         if not rows:
