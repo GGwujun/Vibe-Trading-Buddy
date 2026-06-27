@@ -129,7 +129,8 @@ def _fetch_em_spot(fund_kind: str) -> list[dict[str, Any]] | None:
                     if not code or _fund_market(code) is None:
                         continue
                     price = _safe_float(row.get("price"))
-                    nav = _safe_float(row.get("nav")) or _safe_float(row.get("iopv"))
+                    iopv = _safe_float(row.get("iopv"))
+                    nav = _safe_float(row.get("nav")) or iopv
                     if price > 0 and nav > 0:
                         premium = (price - nav) / nav * 100.0
                     else:
@@ -146,10 +147,12 @@ def _fetch_em_spot(fund_kind: str) -> list[dict[str, Any]] | None:
                         "redeem_status": "",
                         "subscribe_status": "",
                         "trade_date": "",
+                        "iopv": round(iopv, 4) if iopv > 0 else None,
+                        "nav_date": "",  # em gives no NAV date
                         "signal": "溢价" if premium > 0 else ("折价" if premium < 0 else "—"),
                     })
                 return rows
-            except (TimeoutError, OSError, Exception) as exc:
+            except (TimeoutError, OSError, ConnectionError) as exc:
                 last_exc = exc
                 logger.info("fund_premium: em %s attempt %d failed: %s", fund_kind, attempt, exc)
                 time.sleep(0.5)
@@ -205,7 +208,8 @@ def _fetch_lof_nav_em() -> dict[str, dict[str, Any]] | None:
     out: dict[str, dict[str, Any]] = {}
     # Columns vary by akshare version; tolerate both common names.
     code_col = next((c for c in df.columns if "代码" in str(c)), None)
-    name_col = next((c for c in df.columns if "名称" in str(c)), None)
+    # Name column is "基金简称" (contains "简称", NOT "名称"); match both.
+    name_col = next((c for c in df.columns if "简称" in str(c) or "名称" in str(c)), None)
     nav_col = next((c for c in df.columns if "单位净值" in str(c)), None)
     date_col = next((c for c in df.columns if "日期" in str(c) or "时间" in str(c)), None)
     if not code_col or not nav_col:
@@ -303,7 +307,129 @@ def _mootdx_quotes_serial(codes: list[str], limit_codes: int = 120) -> dict[str,
     return out
 
 
-def _akshare_sina_prices() -> dict[str, dict[str, Any]]:
+def _mootdx_quotes_batch(codes: list[str]) -> dict[str, dict[str, Any]]:
+    """Batch-fetch live prices via mootdx (TDX protocol, port 7709).
+
+    Unlike the serial helper, this sends up to 80 symbols per request (the TDX
+    per-packet cap) — the full LOF universe (~440) resolves in well under a
+    second. Bypasses HTTP entirely, so it works when eastmoney's ``88.push2``
+    domain is proxy-blocked. Returns ``{code: {price, pre_close, amount}}`` for
+    codes with a valid (>0) price; halted/suspended funds are dropped.
+    """
+    try:
+        from src.data.mootdx_helper import get_quotes
+        client = get_quotes(timeout=15)
+    except Exception as exc:
+        logger.warning("fund_premium: mootdx batch init failed: %s", exc)
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    for i in range(0, len(codes), 80):
+        chunk = codes[i:i + 80]
+        markets = [_fund_market(c) for c in chunk]
+        # Drop codes whose market we can't classify (keeps symbol/market aligned).
+        pairs = [(c, m) for c, m in zip(chunk, markets) if m is not None]
+        if not pairs:
+            continue
+        syms = [p[0] for p in pairs]
+        mkts = [p[1] for p in pairs]
+        try:
+            df = client.quotes(symbol=syms, market=mkts)
+        except Exception as exc:
+            logger.debug("fund_premium: mootdx batch chunk failed: %s", exc)
+            continue
+        if df is None or df.empty:
+            continue
+        for _, r in df.iterrows():
+            price = _safe_float(r.get("price"))
+            if price <= 0:
+                continue
+            code = str(r.get("code", "")).strip()
+            out[code] = {
+                "price": price,
+                "pre_close": _safe_float(r.get("last_close")),
+                "amount": _safe_float(r.get("amount")),
+            }
+    return out
+
+
+def _fetch_subscribe_redeem_status() -> dict[str, dict[str, str]]:
+    """Fetch ETF subscribe/redeem status via 同花顺 (the only source that exposes it).
+
+    em spot and openfund daily don't carry 申赎 status; ``fund_etf_spot_ths``
+    does (赎回状态/申购状态 columns). Best-effort: returns {} on failure or if
+    ths is unreachable. LOF has no source — those stay empty (UI shows 未知).
+    """
+    import akshare as ak
+    try:
+        df = ak.fund_etf_spot_ths()
+    except Exception as exc:
+        logger.info("fund_premium: ths subscribe/redeem fetch failed: %s", exc)
+        return {}
+    if df is None or df.empty:
+        return {}
+    rename = {k: v for k, v in _THS_COL_MAP.items() if k in df.columns}
+    df = df.rename(columns=rename)
+    out: dict[str, dict[str, str]] = {}
+    for _, row in df.iterrows():
+        code = str(row.get("code", "")).strip()
+        if not code:
+            continue
+        sub = str(row.get("subscribe_status", "")).strip()
+        red = str(row.get("redeem_status", "")).strip()
+        if sub or red:
+            out[code] = {"subscribe_status": sub, "redeem_status": red}
+    return out
+
+
+def _fetch_lof_via_mootdx_batch() -> list[dict[str, Any]]:
+    """Full-market LOF premium scan (PRIMARY LOF path).
+
+    Combines the open-fund daily list (all ~440 LOF codes + NAV + 简称) with a
+    single batched mootdx price pull. This is the only reliable full-market LOF
+    path when ``fund_lof_spot_em`` is unreachable (its ``88.push2.eastmoney.com``
+    host is frequently proxy-blocked). Names come from the open-fund 简称 column,
+    so LOF rows are never nameless.
+    """
+    nav_map = _fetch_lof_nav_em()
+    if not nav_map:
+        return []
+    codes = list(nav_map.keys())
+    prices = _mootdx_quotes_batch(codes)
+    if not prices:
+        return []
+    rows: list[dict[str, Any]] = []
+    for code, pinfo in prices.items():
+        ninfo = nav_map.get(code)
+        if not ninfo:
+            continue
+        nav = ninfo["nav"]
+        price = pinfo["price"]
+        if nav <= 0 or price <= 0:
+            continue
+        premium = (price - nav) / nav * 100.0
+        pre_close = pinfo.get("pre_close", 0.0)
+        rows.append({
+            "code": code,
+            "name": ninfo.get("name", ""),
+            "type": "LOF",
+            "price": round(price, 4),
+            "nav": round(nav, 4),
+            "premium_rate": round(premium, 3),
+            "amount": pinfo.get("amount", 0.0),
+            "change_pct": round(((price - pre_close) / pre_close * 100.0) if pre_close > 0 else 0.0, 3),
+            "redeem_status": ninfo.get("redeem_status", ""),
+            "subscribe_status": ninfo.get("subscribe_status", ""),
+            "trade_date": ninfo.get("trade_date", ""),
+            # ninfo.trade_date is the NAV date (from ths/openfund daily).
+            "nav_date": ninfo.get("trade_date", ""),
+            "iopv": None,
+            "signal": "溢价" if premium > 0 else ("折价" if premium < 0 else "—"),
+        })
+    return rows
+
+
+
     """Akshare sina spot prices (works on Aliyun when mootdx port blocked).
 
     Returns {code: {price, amount}} for exchange-traded assets (stocks + funds).
@@ -413,6 +539,9 @@ def _fetch_via_ths_mootdx(fund_kind: str, limit: int) -> list[dict[str, Any]]:
             "redeem_status": ninfo.get("redeem_status", ""),
             "subscribe_status": ninfo.get("subscribe_status", ""),
             "trade_date": ninfo.get("trade_date", ""),
+            # ninfo.trade_date is the NAV date (from ths/openfund daily).
+            "nav_date": ninfo.get("trade_date", ""),
+            "iopv": None,
             "signal": "溢价" if premium > 0 else ("折价" if premium < 0 else "—"),
         })
     return rows
@@ -422,12 +551,68 @@ def _fetch_via_ths_mootdx(fund_kind: str, limit: int) -> list[dict[str, Any]]:
 # Public: scan + detail
 # ---------------------------------------------------------------------------
 
+def _overlay_subscribe_redeem(rows: list[dict[str, Any]]) -> None:
+    """Fill subscribe/redeem status from 同花顺 (in place, ETF only).
+
+    em/openfund don't expose 申赎 status; ths is the only source (ETF). LOF
+    rows stay empty — the UI shows '未知' rather than faking a value.
+    """
+    codes = [str(r.get("code", "")).strip() for r in rows if not str(r.get("subscribe_status", "")).strip() or not str(r.get("redeem_status", "")).strip()]
+    codes = [c for c in codes if c]
+    if not codes:
+        return
+    status_map = _fetch_subscribe_redeem_status()
+    if not status_map:
+        return
+    for r in rows:
+        info = status_map.get(str(r.get("code", "")).strip())
+        if not info:
+            continue
+        if not str(r.get("subscribe_status", "")).strip():
+            r["subscribe_status"] = info.get("subscribe_status", "")
+        if not str(r.get("redeem_status", "")).strip():
+            r["redeem_status"] = info.get("redeem_status", "")
+
+
+def _backfill_names(rows: list[dict[str, Any]]) -> None:
+    """Fill empty ``name`` fields from the local fund master (in place).
+
+    The LOF fallback source (``fund_open_fund_daily_em``) historically returned
+    a name column the code didn't recognize ("基金简称", not matched by the old
+    "名称" check), so names arrived blank; em rows can occasionally miss one
+    too. Fill what's still empty from ``etf_master`` (ETF names). Best-effort:
+    never raises, skips if store missing.
+    """
+    missing = [str(r.get("code", "")).strip() for r in rows if not str(r.get("name", "")).strip()]
+    missing = [c for c in missing if c]
+    if not missing:
+        return
+    try:
+        from src.data.market_store import get_market_store
+        store = get_market_store()
+        if store is None:
+            return
+        names = store.etf_names(missing)
+    except Exception as exc:  # noqa: BLE001 — best-effort enrichment
+        logger.debug("fund_premium: name backfill skipped: %s", exc)
+        return
+    if not names:
+        return
+    for r in rows:
+        if str(r.get("name", "")).strip():
+            continue
+        code = str(r.get("code", "")).strip()
+        name = names.get(code)
+        if name:
+            r["name"] = name
+
+
 def scan_fund_premium(
     fund_type: str = "ETF",
     min_abs_premium: float = 0.0,
     limit: int = 50,
     use_cache: bool = True,
-    try_em: bool = False,
+    try_em: bool = True,
 ) -> list[dict[str, Any]]:
     """Scan funds for premium/discount arbitrage opportunities.
 
@@ -437,9 +622,11 @@ def scan_fund_premium(
         limit: max rows returned (sorted by |premium| desc). Also caps how many
             funds are quoted via mootdx in the fallback path (each quote ~0.5s
             serially, so 50 ≈ 25s worst case).
-        try_em: if True, try eastmoney first (full market + 折价率 directly).
-            Disabled by default because em's connection hangs unpredictably
-            under rate-limiting and can't be reliably timed out on Windows.
+        try_em: if True (default), try eastmoney first — it's the only source
+            that returns the full market WITH names AND the 折价率 directly, in
+            one call. If em fails (it's flaky under rate-limiting), we fall back
+            to the ths+mootdx path, which fills missing names from
+            ``security_master``.
 
     Note: |premium| > 50% is treated as stale-NAV noise (new funds / NAV not
     yet updated) and filtered out.
@@ -458,12 +645,23 @@ def scan_fund_premium(
         if try_em:
             rows = _fetch_em_spot(kind)
         if rows is None:
-            # mootdx serial quotes are ~0.5s each; cap at `limit` (+headroom) to
-            # keep the scan responsive. 40 funds ≈ 20s.
-            quote_cap = min(max(limit, 40), 80)
-            rows = _fetch_via_ths_mootdx(kind, limit=quote_cap)
-            logger.info("fund_premium: %s via ths+mootdx (%d rows)", kind, len(rows))
+            if kind == "LOF":
+                # Full-market LOF via open-fund NAV list + batched mootdx quotes.
+                # Sub-second, no name gap, no 88.push2 dependency.
+                rows = _fetch_lof_via_mootdx_batch()
+                logger.info("fund_premium: LOF via mootdx batch (%d rows)", len(rows))
+            else:
+                # ETF fallback: ths NAV + mootdx serial (top-N active).
+                quote_cap = min(max(limit, 40), 80)
+                rows = _fetch_via_ths_mootdx(kind, limit=quote_cap)
+                logger.info("fund_premium: %s via ths+mootdx (%d rows)", kind, len(rows))
         all_rows.extend(rows)
+
+    # Backfill missing names from the local security_master. The LOF fallback
+    # path (fund_open_fund_daily_em) returns NO name column, and em rows can
+    # occasionally lack one too — fill them so the UI isn't nameless.
+    _backfill_names(all_rows)
+    _overlay_subscribe_redeem(all_rows)
 
     # Filter: min premium + drop absurd values (stale NAV noise)
     out = [

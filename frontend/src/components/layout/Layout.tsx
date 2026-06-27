@@ -19,8 +19,8 @@ const NAV_GROUPS = [
   {
     title: "工作台",
     items: [
-      { to: "/", icon: BarChart3, label: "今日总览" },
-      { to: "/market-dashboard", icon: Radar, label: "AI 盘面" },
+      { to: "/", icon: BarChart3, label: "我的工作台" },
+      { to: "/market-dashboard", icon: Radar, label: "总览大屏" },
     ],
   },
   {
@@ -42,11 +42,12 @@ const NAV_GROUPS = [
     title: "市场情报",
     items: [
       { to: "/morning-brief", icon: CalendarClock, label: "早盘内参" },
+      { to: "/daily-recommendations", icon: Target, label: "今日推荐" },
       { to: "/intraday-monitor", icon: Target, label: "盘中监控" },
       { to: "/tail-strategy", icon: Zap, label: "尾盘策略" },
       { to: "/close-review", icon: BarChart3, label: "收盘复盘" },
-      { to: "/daily-recommendations", icon: Target, label: "今日推荐" },
       { to: "/recommendation-history", icon: BarChart3, label: "推荐历史" },
+      { to: "/fund-opportunity", icon: Coins, label: "套利机会" },
     ],
   },
   {

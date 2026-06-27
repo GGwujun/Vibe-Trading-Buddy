@@ -174,7 +174,7 @@ export function Home() {
                 <BarChart3 className="h-4 w-4 text-primary" />
                 工作台
               </div>
-              <h1 className="mt-1 text-2xl font-semibold tracking-tight">今日总览</h1>
+              <h1 className="mt-1 text-2xl font-semibold tracking-tight">我的工作台</h1>
               <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
                 汇总机会、投研报告和回测记录，把分散功能收束成下一步行动。
               </p>

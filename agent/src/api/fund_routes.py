@@ -142,6 +142,84 @@ def _parse_fund_decision_block(content: str) -> dict | None:
 # Route registration
 # ---------------------------------------------------------------------------
 
+# Static arbitrage economics (round-number defaults; refined per-type).
+# Cost = round-trip fee estimate (trade + subscribe/redeem), in % of notional.
+_ARBITRAGE_COST_PCT = {"ETF": 0.5, "LOF": 1.2, "QDII": 1.5}
+# Settlement cycle (days until subscribed shares can be sold / redemption lands).
+_SETTLE_DAYS = {"ETF": 1, "LOF": 2, "QDII": 3}
+# Min history (trading days) before a percentile is trustworthy. Below this the
+# UI shows nothing — never a fake signal from thin history.
+_MIN_HISTORY_DAYS = 20
+
+
+def _blocked_status(status: str) -> bool:
+    """True if a 申赎 status string indicates suspension (blocking arbitrage)."""
+    s = status or ""
+    return any(k in s for k in ("暂停", "停止", "封闭", "结束"))
+
+
+def _enrich_items(items: list[dict], store: Any, trade_date: str | None) -> None:
+    """Add per-item derived fields used by the UI (in place).
+
+    - direction: 申购套利 / 赎回套利
+    - net_return: |premium| minus round-trip cost (clamped ≥ 0)
+    - settle_days: by fund type
+    - is_stale_nav: NAV date != snapshot date (NAV lag, e.g. QDII T-1)
+    - can_trade: false if subscribe/redeem is suspended (direction-dependent)
+    - premium_percentile / amount_percentile: only when ≥ _MIN_HISTORY_DAYS exist
+    """
+    for r in items:
+        premium = float(r.get("premium_rate") or 0.0)
+        ftype = (r.get("type") or "").upper()
+        r["direction"] = "申购套利" if premium > 0 else ("赎回套利" if premium < 0 else "—")
+        cost = _ARBITRAGE_COST_PCT.get(ftype, 1.0)
+        r["net_return"] = round(max(0.0, abs(premium) - cost), 3)
+        r["settle_days"] = _SETTLE_DAYS.get(ftype, 2)
+        # Stale NAV: only flag when a real nav_date exists AND differs from snapshot.
+        nav_date = str(r.get("nav_date") or "").strip()
+        r["is_stale_nav"] = bool(nav_date and trade_date and nav_date != trade_date)
+        sub = str(r.get("subscribe_status") or "")
+        red = str(r.get("redeem_status") or "")
+        # 申购套利 needs subscription open; 赎回套利 needs redemption open.
+        if premium > 0:
+            r["can_trade"] = not _blocked_status(sub) if sub else True
+        elif premium < 0:
+            r["can_trade"] = not _blocked_status(red) if red else True
+        else:
+            r["can_trade"] = True
+        # Placeholders for percentile (filled below if history suffices).
+        r["premium_percentile"] = None
+        r["amount_percentile"] = None
+
+    # Percentile only when enough history exists (skeleton: auto-enables later).
+    if store is None:
+        return
+    for r in items:
+        code = r.get("code")
+        if not code:
+            continue
+        try:
+            hist = store.get_fund_premium_history(code, _MIN_HISTORY_DAYS)
+        except Exception:
+            hist = []
+        if len(hist) < _MIN_HISTORY_DAYS:
+            continue  # not enough history → leave null (no fake signal)
+        cur_prem = abs(float(r.get("premium_rate") or 0.0))
+        cur_amt = float(r.get("amount") or 0.0)
+        prems = [abs(float(h.get("premium_rate") or 0.0)) for h in hist]
+        amts = [float(h.get("amount") or 0.0) for h in hist]
+        r["premium_percentile"] = round(_percentile(cur_prem, prems), 2)
+        r["amount_percentile"] = round(_percentile(cur_amt, amts), 2)
+
+
+def _percentile(value: float, sample: list[float]) -> float:
+    """Fraction (0-100) of `sample` strictly below `value`."""
+    if not sample:
+        return 0.0
+    below = sum(1 for s in sample if s < value)
+    return below / len(sample) * 100.0
+
+
 def register_fund_arbitrage_routes(
     app: FastAPI,
     require_auth: Callable[[Request], Awaitable[None]],
@@ -155,18 +233,110 @@ def register_fund_arbitrage_routes(
     async def scan_funds(
         request: Request,
         type: str = Query("ETF", description="ETF/LOF/ALL"),
-        min_premium: float = Query(0.5, description="最小 |折溢价率|%"),
-        limit: int = Query(50, ge=1, le=200),
+        min_premium: float = Query(0.5, ge=0, description="最小 |折溢价率|%"),
+        page: int = Query(1, ge=1, description="页码，1-based"),
+        page_size: int = Query(20, ge=1, le=200, description="每页条数"),
+        sort: str = Query(
+            "premium_abs",
+            description="排序：premium_abs=|折溢价|降序(默认) / premium_desc=溢价优先 / "
+            "premium_asc=折价优先 / amount_desc=成交额降序(流动性优先)",
+        ),
+        limit: int | None = Query(None, ge=1, le=200, description="兼容旧前端，等价于 page_size"),
         _=Depends(require_auth),
     ):
-        """Scan funds for premium/discount arbitrage opportunities."""
+        """Scan funds for premium/discount arbitrage opportunities.
+
+        Reads the latest persisted snapshot (synced every ~5 min during trading
+        by the market-sync daemon). Falls back to a live scan when the DB is
+        cold (first run / non-trading day before any sync). Filtering by type
+        and min premium + pagination happen in memory — the snapshot is ≤200
+        rows per trade_date.
+        """
         from src.data.fund_premium import scan_fund_premium
-        try:
-            rows = scan_fund_premium(fund_type=type, min_abs_premium=min_premium, limit=limit)
-            return {"status": "ok", "count": len(rows), "items": rows}
-        except Exception as exc:
-            logger.error("fund scan failed: %s", exc, exc_info=True)
-            raise HTTPException(status_code=500, detail=f"扫描失败: {exc}")
+        from src.data.market_store import get_market_store
+
+        # Legacy `limit` param maps to page_size.
+        if limit is not None:
+            page_size = limit
+
+        fund_type_upper = type.upper()
+        want_all = fund_type_upper in ("ALL", "全部")
+
+        def _paginate(rows: list[dict]) -> tuple[int, int, list[dict]]:
+            # Filter: type (ALL skips) + min premium. scan_fund_premium already
+            # dropped |premium|>50 (stale-NAV noise), so we only apply the
+            # caller's lower bound here.
+            filtered = [
+                r for r in rows
+                if (want_all or r.get("type", "").upper() == fund_type_upper)
+                and abs(float(r.get("premium_rate") or 0.0)) >= min_premium
+            ]
+            # Sort by the requested key (stable tiebreak: |premium| desc).
+            _prem = lambda r: float(r.get("premium_rate") or 0.0)
+            _amt = lambda r: float(r.get("amount") or 0.0)
+            if sort == "amount_desc":
+                filtered.sort(key=lambda r: (_amt(r), abs(_prem(r))), reverse=True)
+            elif sort == "premium_asc":
+                # 折价优先（折价率最负在前）→ 升序
+                filtered.sort(key=lambda r: (_prem(r), -abs(_prem(r))))
+            elif sort == "premium_desc":
+                # 溢价优先（溢价率最正在前）→ 降序
+                filtered.sort(key=lambda r: (_prem(r), abs(_prem(r))), reverse=True)
+            else:  # premium_abs (default): |折溢价| 降序，套利空间最大
+                filtered.sort(key=lambda r: abs(_prem(r)), reverse=True)
+            total = len(filtered)
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            start = (page - 1) * page_size
+            page_items = filtered[start:start + page_size]
+            return total, total_pages, page_items
+
+        trade_date = None
+        source = "live"
+        updated_at: str | None = None
+        rows: list[dict] = []
+
+        store = get_market_store()
+        if store is not None:
+            trade_date = store.latest_date("fund_premium_snapshot")
+        if trade_date:
+            rows = store.get_fund_premium(trade_date)
+            if rows:
+                source = "snapshot"
+                # Per-row updated_at is stamped on every upsert; MAX = latest sync.
+                times = [r.get("updated_at") for r in rows if r.get("updated_at")]
+                updated_at = max(times) if times else None
+                # Overlay authoritative daily-refreshed names from fund_master
+                # (falls back to snapshot.name if fund_master is cold/empty).
+                master_names = store.get_fund_master_names([r.get("code") for r in rows if r.get("code")])
+                if master_names:
+                    for r in rows:
+                        nm = master_names.get(r.get("code"))
+                        if nm:
+                            r["name"] = nm
+
+        # Cold cache (no snapshot yet) → live scan so the page still works.
+        if source == "live":
+            try:
+                rows = scan_fund_premium(fund_type="ALL", min_abs_premium=0.0, limit=3000)
+            except Exception as exc:
+                logger.error("fund scan live fallback failed: %s", exc, exc_info=True)
+                raise HTTPException(status_code=500, detail=f"扫描失败: {exc}")
+            trade_date = None
+            updated_at = None
+
+        total, total_pages, page_items = _paginate(rows)
+        _enrich_items(page_items, store, trade_date)
+        return {
+            "status": "ok",
+            "source": source,
+            "trade_date": trade_date,
+            "updated_at": updated_at,
+            "count": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "items": page_items,
+        }
 
     # ── Source status ─────────────────────────────────────────────
     @app.get("/fund/source-status")
