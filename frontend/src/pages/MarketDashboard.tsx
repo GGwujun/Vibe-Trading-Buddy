@@ -299,7 +299,14 @@ function IndexMiniCard({ meta, row, latestDate }: { meta: { symbol: string; name
     <div className="rounded-md border bg-muted/20 p-3">
       <div className="flex items-start justify-between gap-2">
         <div className="text-sm font-medium text-muted-foreground">{meta.name}</div>
-        <span className={cn("text-xs font-semibold tabular-nums", valueTone(row?.change_pct))}>{row ? pct(row.change_pct) : "数据不可用"}</span>
+        <div className="flex items-center gap-1.5">
+          {stale && (
+            <span className="rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-300" title={`指数数据滞后：最新交易日 ${latestDate}，指数仅到 ${row?.trade_date}`}>
+              滞后
+            </span>
+          )}
+          <span className={cn("text-xs font-semibold tabular-nums", valueTone(row?.change_pct))}>{row ? pct(row.change_pct) : "数据不可用"}</span>
+        </div>
       </div>
       <div className={cn("mt-1 text-2xl font-bold tabular-nums", valueTone(row?.change_pct))}>
         {row ? row.price.toLocaleString("zh-CN", { maximumFractionDigits: 3 }) : "-"}
