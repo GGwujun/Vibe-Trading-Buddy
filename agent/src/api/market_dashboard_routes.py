@@ -215,7 +215,7 @@ def _build_index_rows(df: pd.DataFrame) -> list[dict[str, Any]]:
     if not code_col or not name_col:
         return []
 
-    preferred_codes = ("000001", "399001", "399006", "000300", "000905", "899050")
+    preferred_codes = ("000001", "399001", "399006", "000300", "000905", "000852", "000688", "899050")
     preferred_names = ("上证", "深证", "创业板", "沪深300", "中证500", "北证50")
     rows: list[dict[str, Any]] = []
     for _, row in df.iterrows():
@@ -1075,7 +1075,7 @@ def _db_market_overview() -> dict[str, Any]:
             "trade_date": r["trade_date"],
         })
 
-    return {
+    overview = {
         "as_of": _now_cst().isoformat(),
         "source": "market_db",
         "trade_date": trade_date,
@@ -1093,10 +1093,102 @@ def _db_market_overview() -> dict[str, Any]:
         "top_gainers": [_stock(r) for r in top[:8]],
         "top_losers": [_stock(r) for r in bottom[:8]],
     }
+    try:
+        snapshot = _latest_breadth_snapshot(store, trade_date)
+        if snapshot:
+            overview = _apply_breadth_snapshot(overview, snapshot)
+    except Exception as exc:  # noqa: BLE001 - dashboard should keep the bars fallback
+        logger.info("market overview: breadth snapshot unavailable: %s", exc)
+    return overview
 
 
 def _load_market_overview() -> dict[str, Any]:
-    return _db_market_overview()
+    overview = _db_market_overview()
+    live_indices = _live_index_rows()
+    if live_indices:
+        overview = dict(overview)
+        overview["indices"] = live_indices
+        overview["index_source"] = "akshare.index_spot"
+        overview["as_of"] = _now_cst().isoformat()
+    return overview
+
+
+def _latest_breadth_snapshot(store: Any, fallback_trade_date: str | None) -> dict[str, Any] | None:
+    dates: list[str] = []
+    for trade_date in (_today_cst(), fallback_trade_date):
+        if trade_date and trade_date not in dates:
+            dates.append(trade_date)
+    for trade_date in dates:
+        snapshot = store.get_market_breadth_snapshot(trade_date)
+        if snapshot:
+            return snapshot
+    return None
+
+
+def _apply_breadth_snapshot(overview: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
+    breadth = dict(overview.get("breadth") or {})
+    for key in ("total", "advancers", "decliners", "limit_up", "limit_down", "max_limit_up_height"):
+        if snapshot.get(key) is not None:
+            breadth[key] = int(snapshot.get(key) or 0)
+    if snapshot.get("unchanged") is not None:
+        breadth["flat"] = int(snapshot.get("unchanged") or 0)
+    if snapshot.get("turnover_billion") is not None:
+        breadth["turnover_billion"] = round(float(snapshot.get("turnover_billion") or 0), 2)
+
+    updated = dict(overview)
+    updated["breadth"] = breadth
+    updated["trade_date"] = snapshot.get("trade_date") or overview.get("trade_date")
+    updated["breadth_source"] = snapshot.get("source") or "market_breadth_snapshot"
+    updated["breadth_updated_at"] = snapshot.get("updated_at")
+    return updated
+
+
+_INDEX_SYMBOL_MAP = {
+    "000001": "000001.SH",
+    "399001": "399001.SZ",
+    "399006": "399006.SZ",
+    "000300": "000300.SH",
+    "000905": "000905.SH",
+    "000852": "000852.SH",
+    "000688": "000688.SH",
+    "899050": "899050.BJ",
+}
+
+
+def _normalize_index_symbol(symbol: Any) -> str:
+    raw = str(symbol or "").strip().upper()
+    if raw in _INDEX_SYMBOL_MAP.values():
+        return raw
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    code = digits[-6:] if len(digits) >= 6 else raw
+    return _INDEX_SYMBOL_MAP.get(code, raw)
+
+
+def _live_index_rows() -> list[dict[str, Any]]:
+    try:
+        index_df = _fetch_index_spot()
+        if index_df is None or index_df.empty:
+            return []
+        rows = _build_index_rows(index_df)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("market overview: live index fetch failed: %s", exc)
+        return []
+
+    trade_date = _today_cst()
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        symbol = _normalize_index_symbol(row.get("symbol"))
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        normalized.append({
+            **row,
+            "symbol": symbol,
+            "trade_date": trade_date,
+            "source": "akshare.index_spot",
+        })
+    return normalized
 
 
 def _compute_sentiment(

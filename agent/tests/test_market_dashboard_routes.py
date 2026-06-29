@@ -181,3 +181,69 @@ def test_close_review_stage_uses_completed_session_date(monkeypatch) -> None:
     assert body["date"] == "2026-06-25"
     assert body["data"]["title"] == "close review"
     assert store.calls == [("close-review", "2026-06-25")]
+
+
+def test_market_overview_uses_live_index_rows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        routes,
+        "_db_market_overview",
+        lambda: {
+            "as_of": "2026-06-29T08:00:00+08:00",
+            "source": "market_db",
+            "trade_date": "2026-06-26",
+            "breadth": {"total": 1, "advancers": 0, "decliners": 1},
+            "indices": [{"symbol": "000001.SH", "price": 3000, "trade_date": "2026-06-26"}],
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_live_index_rows",
+        lambda: [{"symbol": "000001.SH", "price": 3100, "trade_date": "2026-06-29"}],
+    )
+
+    overview = routes._load_market_overview()
+
+    assert overview["indices"] == [{"symbol": "000001.SH", "price": 3100, "trade_date": "2026-06-29"}]
+    assert overview["index_source"] == "akshare.index_spot"
+    assert overview["trade_date"] == "2026-06-26"
+
+
+def test_apply_breadth_snapshot_maps_intraday_fields() -> None:
+    overview = {
+        "trade_date": "2026-06-26",
+        "breadth": {
+            "total": 5000,
+            "advancers": 100,
+            "decliners": 4900,
+            "flat": 0,
+            "turnover_billion": 900.0,
+        },
+    }
+    snapshot = {
+        "trade_date": "2026-06-29",
+        "total": 5867,
+        "advancers": 1911,
+        "decliners": 3495,
+        "unchanged": 104,
+        "limit_up": 71,
+        "limit_down": 37,
+        "max_limit_up_height": 3,
+        "turnover_billion": None,
+        "source": "market_breadth_snapshot",
+        "updated_at": "2026-06-29T12:22:00+08:00",
+    }
+
+    updated = routes._apply_breadth_snapshot(overview, snapshot)
+
+    assert updated["trade_date"] == "2026-06-29"
+    assert updated["breadth"] == {
+        "total": 5867,
+        "advancers": 1911,
+        "decliners": 3495,
+        "flat": 104,
+        "turnover_billion": 900.0,
+        "limit_up": 71,
+        "limit_down": 37,
+        "max_limit_up_height": 3,
+    }
+    assert updated["breadth_source"] == "market_breadth_snapshot"
