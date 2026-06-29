@@ -262,3 +262,55 @@ def test_apply_breadth_snapshot_maps_intraday_fields() -> None:
         "max_limit_up_height": 3,
     }
     assert updated["breadth_source"] == "market_breadth_snapshot"
+
+
+def test_append_provisional_bar_replaces_same_date_and_trims() -> None:
+    bars = [
+        {"date": "2026-06-25", "close": 10},
+        {"date": "2026-06-26", "close": 11},
+        {"date": "2026-06-29", "close": 12},
+    ]
+    provisional = {"date": "2026-06-29", "close": 13, "provisional": True}
+
+    out = routes._append_provisional_bar(bars, provisional, limit=2)
+
+    assert out == [
+        {"date": "2026-06-26", "close": 11},
+        {"date": "2026-06-29", "close": 13, "provisional": True},
+    ]
+
+
+def test_stock_spot_provisional_daily_bar_builds_intraday_daily(monkeypatch) -> None:
+    monkeypatch.setattr(
+        routes,
+        "_fetch_a_share_spot",
+        lambda: pd.DataFrame(
+            [
+                {
+                    "code": "600000",
+                    "price": 12.34,
+                    "open": 12.0,
+                    "high": 12.5,
+                    "low": 11.9,
+                    "volume": 1000,
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(routes, "_now_cst", lambda: routes.datetime(2026, 6, 29, 10, 0, tzinfo=routes._CST))
+
+    bar = routes._stock_spot_provisional_daily_bar("600000.SH", "2026-06-29")
+
+    assert bar is not None
+    assert bar["date"] == "2026-06-29"
+    assert bar["open"] == 12.0
+    assert bar["close"] == 12.34
+    assert bar["high"] == 12.5
+    assert bar["low"] == 11.9
+    assert bar["volume"] == 1000.0
+    assert bar["provisional"] is True
+    assert bar["source"] == "akshare.stock_spot"
+
+
+def test_provisional_daily_bar_skips_when_official_bar_is_today() -> None:
+    assert routes._provisional_daily_bar(store=object(), project_code="000001.SH", latest_official_date=routes._today_cst()) is None

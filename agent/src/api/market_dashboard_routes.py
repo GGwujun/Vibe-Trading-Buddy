@@ -1163,6 +1163,215 @@ def _normalize_index_symbol(symbol: Any) -> str:
     return _INDEX_SYMBOL_MAP.get(code, raw)
 
 
+def _bare_market_code(code: Any) -> str:
+    raw = str(code or "").strip().upper()
+    for prefix in ("SH", "SZ", "BJ"):
+        if raw.startswith(prefix) and len(raw) >= 8:
+            raw = raw[2:]
+    for suffix in (".SH", ".SZ", ".BJ"):
+        if raw.endswith(suffix):
+            raw = raw[: -len(suffix)]
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    return digits[-6:] if len(digits) >= 6 else raw.replace(".", "")
+
+
+def _normalize_market_code(code: Any) -> str:
+    raw = str(code or "").strip().upper()
+    if raw.endswith((".SH", ".SZ", ".BJ")):
+        return raw
+    bare = _bare_market_code(raw)
+    if not bare:
+        return ""
+    return bare + _project_suffix(bare)
+
+
+def _round_bar_value(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return round(float(value), 3)
+    except Exception:
+        return None
+
+
+def _is_intraday_bar_allowed(today: str, latest_official_date: str | None) -> bool:
+    if latest_official_date == today:
+        return False
+    try:
+        from src.data.trade_calendar import cn_market_phase, is_trading_day
+
+        return bool(is_trading_day(today) and cn_market_phase() in {"in_session", "lunch_break"})
+    except Exception:  # noqa: BLE001
+        now = _now_cst()
+        return now.weekday() < 5 and time(9, 30) <= now.time() < time(15, 0)
+
+
+def _append_provisional_bar(bars: list[dict[str, Any]], provisional: dict[str, Any] | None, limit: int) -> list[dict[str, Any]]:
+    if not provisional:
+        return bars[-limit:]
+    date = provisional.get("date")
+    if not date:
+        return bars[-limit:]
+    filtered = [bar for bar in bars if bar.get("date") != date]
+    filtered.append(provisional)
+    return filtered[-limit:]
+
+
+def _spot_row_bar(
+    row: Any,
+    *,
+    trade_date: str,
+    snapshot_at: str,
+    source: str,
+    price_col: str | None,
+    open_col: str | None,
+    high_col: str | None,
+    low_col: str | None,
+    volume_col: str | None,
+) -> dict[str, Any] | None:
+    close = _round_bar_value(row.get(price_col)) if price_col else None
+    open_ = _round_bar_value(row.get(open_col)) if open_col else None
+    high = _round_bar_value(row.get(high_col)) if high_col else None
+    low = _round_bar_value(row.get(low_col)) if low_col else None
+    if close is None:
+        return None
+    open_ = open_ if open_ is not None and open_ > 0 else close
+    high = high if high is not None and high > 0 else max(open_, close)
+    low = low if low is not None and low > 0 else min(open_, close)
+    volume = _number(row.get(volume_col), 0.0) if volume_col else 0.0
+    return {
+        "date": trade_date,
+        "open": open_,
+        "close": close,
+        "high": high,
+        "low": low,
+        "volume": float(volume or 0),
+        "provisional": True,
+        "is_realtime": True,
+        "source": source,
+        "snapshot_at": snapshot_at,
+    }
+
+
+def _index_provisional_daily_bar(project_code: str, trade_date: str) -> dict[str, Any] | None:
+    try:
+        df = _fetch_index_spot()
+    except Exception as exc:  # noqa: BLE001
+        logger.info("index provisional bar %s fetch failed: %s", project_code, exc)
+        return None
+    if df is None or df.empty:
+        return None
+    code_col = _column(df, ("代码", "code", "symbol"), 1)
+    price_col = _column(df, ("最新价", "最新", "price", "trade", "close"), 3)
+    open_col = _column(df, ("今开", "开盘", "open"), None)
+    high_col = _column(df, ("最高", "high"), None)
+    low_col = _column(df, ("最低", "low"), None)
+    volume_col = _column(df, ("成交量", "volume"), None)
+    if not code_col:
+        return None
+    snapshot_at = _now_cst().isoformat()
+    for _, row in df.iterrows():
+        symbol = _normalize_index_symbol(row.get(code_col))
+        if symbol != project_code:
+            continue
+        return _spot_row_bar(
+            row,
+            trade_date=trade_date,
+            snapshot_at=snapshot_at,
+            source="akshare.index_spot",
+            price_col=price_col,
+            open_col=open_col,
+            high_col=high_col,
+            low_col=low_col,
+            volume_col=volume_col,
+        )
+    return None
+
+
+def _stock_realtime_snapshot_bar(store: Any, project_code: str, trade_date: str) -> dict[str, Any] | None:
+    bare = _bare_market_code(project_code)
+    candidates = {project_code, bare}
+    try:
+        placeholders = ",".join("?" for _ in candidates)
+        row = store._conn.execute(
+            f"""
+            SELECT trade_date, code, snapshot_at, price, open, high, low, volume, source, updated_at
+            FROM realtime_quote_snapshot
+            WHERE trade_date = ? AND code IN ({placeholders})
+            ORDER BY snapshot_at DESC
+            LIMIT 1
+            """,
+            (trade_date, *candidates),
+        ).fetchone()
+    except Exception as exc:  # noqa: BLE001
+        logger.info("stock realtime snapshot %s failed: %s", project_code, exc)
+        return None
+    if not row:
+        return None
+    close = _round_bar_value(row["price"])
+    if close is None:
+        return None
+    open_ = _round_bar_value(row["open"]) or close
+    high = _round_bar_value(row["high"]) or max(open_, close)
+    low = _round_bar_value(row["low"]) or min(open_, close)
+    return {
+        "date": trade_date,
+        "open": open_,
+        "close": close,
+        "high": high,
+        "low": low,
+        "volume": float(row["volume"] or 0),
+        "provisional": True,
+        "is_realtime": True,
+        "source": row["source"] or "realtime_quote_snapshot",
+        "snapshot_at": row["snapshot_at"] or row["updated_at"],
+    }
+
+
+def _stock_spot_provisional_daily_bar(project_code: str, trade_date: str) -> dict[str, Any] | None:
+    try:
+        df = _fetch_a_share_spot()
+    except Exception as exc:  # noqa: BLE001
+        logger.info("stock provisional bar %s fetch failed: %s", project_code, exc)
+        return None
+    if df is None or df.empty:
+        return None
+    code_col = _column(df, ("代码", "code", "symbol"), 1)
+    price_col = _column(df, ("最新价", "最新", "price", "trade", "close"), 3)
+    open_col = _column(df, ("今开", "开盘", "open"), None)
+    high_col = _column(df, ("最高", "high"), None)
+    low_col = _column(df, ("最低", "low"), None)
+    volume_col = _column(df, ("成交量", "volume"), None)
+    if not code_col:
+        return None
+    snapshot_at = _now_cst().isoformat()
+    for _, row in df.iterrows():
+        if _normalize_market_code(row.get(code_col)) != project_code:
+            continue
+        return _spot_row_bar(
+            row,
+            trade_date=trade_date,
+            snapshot_at=snapshot_at,
+            source="akshare.stock_spot",
+            price_col=price_col,
+            open_col=open_col,
+            high_col=high_col,
+            low_col=low_col,
+            volume_col=volume_col,
+        )
+    return None
+
+
+def _provisional_daily_bar(store: Any, project_code: str, latest_official_date: str | None) -> dict[str, Any] | None:
+    today = _today_cst()
+    if not _is_intraday_bar_allowed(today, latest_official_date):
+        return None
+    normalized = _normalize_index_symbol(project_code)
+    if normalized in _INDEX_SYMBOL_MAP.values():
+        return _index_provisional_daily_bar(normalized, today)
+    return _stock_realtime_snapshot_bar(store, project_code, today) or _stock_spot_provisional_daily_bar(project_code, today)
+
+
 def _live_index_rows() -> list[dict[str, Any]]:
     try:
         index_df = _fetch_index_spot()
@@ -1801,7 +2010,7 @@ def register_market_dashboard_routes(
 
     @app.get("/market-dashboard/bars/{code}", dependencies=[Depends(require_auth)])
     async def get_market_bars(code: str, days: int = 60) -> dict[str, Any]:
-        """Daily OHLCV bars for the K-line chart (DB-backed, no intraday)."""
+        """Daily OHLCV bars plus a provisional intraday bar when available."""
         raw = (code or "").strip()
         # Normalize sh/sz prefixes and .SH/.SZ suffix to a project code.
         bare = (
@@ -1853,7 +2062,14 @@ def register_market_dashboard_routes(
                 }
                 for r in reversed(rows)
             ]
-            return {"status": "ok", "code": rows[0]["code"], "bars": out}
+            official_code = rows[0]["code"]
+            latest_official_date = out[-1]["date"] if out else None
+            out = _append_provisional_bar(
+                out,
+                _provisional_daily_bar(store, _normalize_index_symbol(official_code), latest_official_date),
+                limit,
+            )
+            return {"status": "ok", "code": official_code, "bars": out}
 
         # Stock K-line falls back to bars_daily. Try both suffix-normalized and bare
         # forms for older local data.
@@ -1875,5 +2091,11 @@ def register_market_dashboard_routes(
                         "low": round(float(row[cols.get("low", "low")]), 3) if "low" in cols else None,
                         "volume": float(row[cols.get("volume", "volume")]) if "volume" in cols else 0.0,
                     })
+                latest_official_date = out[-1]["date"] if out else None
+                out = _append_provisional_bar(
+                    out,
+                    _provisional_daily_bar(store, _normalize_market_code(candidate), latest_official_date),
+                    limit,
+                )
                 return {"status": "ok", "code": candidate, "bars": out}
         return {"status": "ok", "code": project_code, "bars": []}
