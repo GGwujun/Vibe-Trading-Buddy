@@ -554,6 +554,25 @@ def _realtime_performance(symbol: str, price_at_pick: float, pick_date: str) -> 
     }
 
 
+def _baseline_today_performance(price_at_pick: float, pick_date: str) -> dict[str, Any] | None:
+    if pick_date != _today_cst() or price_at_pick <= 0:
+        return None
+    return {
+        "status": "baseline",
+        "latest_date": pick_date,
+        "latest_price": round(price_at_pick, 3),
+        "latest_return_pct": 0.0,
+        "max_gain_pct": 0.0,
+        "max_drawdown_pct": 0.0,
+        "source": "price_at_pick",
+        "snapshot_at": None,
+        "t0": {"date": pick_date, "close": round(price_at_pick, 3), "return_pct": 0.0},
+        "t1": None,
+        "t3": None,
+        "t5": None,
+    }
+
+
 def _performance_for(record: dict[str, Any]) -> dict[str, Any]:
     from src.data.market_data_service import latest_daily_bars
 
@@ -565,7 +584,11 @@ def _performance_for(record: dict[str, Any]) -> dict[str, Any]:
     pick_date = str(record.get("date", ""))
     df = latest_daily_bars(symbol, days=40)
     if df is None or df.empty or "close" not in df.columns:
-        return _realtime_performance(symbol, price, pick_date) or {"status": "no_market_data"}
+        return (
+            _realtime_performance(symbol, price, pick_date)
+            or _baseline_today_performance(price, pick_date)
+            or {"status": "no_market_data"}
+        )
 
     rows = []
     for idx, row in df.sort_index().iterrows():
@@ -576,7 +599,11 @@ def _performance_for(record: dict[str, Any]) -> dict[str, Any]:
             low = float(row.get("low", close) or close)
             rows.append({"date": date, "close": close, "high": high, "low": low})
     if not rows:
-        return _realtime_performance(symbol, price, pick_date) or {"status": "pending"}
+        return (
+            _realtime_performance(symbol, price, pick_date)
+            or _baseline_today_performance(price, pick_date)
+            or {"status": "pending"}
+        )
 
     out: dict[str, Any] = {
         "status": "ok",
