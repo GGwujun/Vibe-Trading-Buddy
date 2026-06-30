@@ -2901,7 +2901,7 @@ def _yahoo_chart_last_rows(symbols: list[str], *, period: str = "10d") -> dict[s
     ``_yf_last_rows``.
     """
     import requests
-    from urllib.parse import quote
+    from urllib.parse import quote as url_quote
 
     out: dict[str, list[dict[str, Any]]] = {}
     range_arg = "10d" if period == "10d" else period
@@ -2934,20 +2934,20 @@ def _yahoo_chart_last_rows(symbols: list[str], *, period: str = "10d") -> dict[s
             return None
 
     for symbol in symbols:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol, safe='')}?range={range_arg}&interval=1d"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{url_quote(symbol, safe='')}?range={range_arg}&interval=1d"
         payload = _fetch_json(url)
         try:
             result = ((payload or {}).get("chart") or {}).get("result") or []
             item = result[0]
             timestamps = item.get("timestamp") or []
-            quote = (((item.get("indicators") or {}).get("quote") or [{}])[0]) or {}
+            quote_row = (((item.get("indicators") or {}).get("quote") or [{}])[0]) or {}
             rows: list[dict[str, Any]] = []
             start = max(0, len(timestamps) - 8)
-            opens = quote.get("open") or []
-            highs = quote.get("high") or []
-            lows = quote.get("low") or []
-            closes = quote.get("close") or []
-            volumes = quote.get("volume") or []
+            opens = quote_row.get("open") or []
+            highs = quote_row.get("high") or []
+            lows = quote_row.get("low") or []
+            closes = quote_row.get("close") or []
+            volumes = quote_row.get("volume") or []
             for i, ts in enumerate(timestamps[start:], start=start):
                 close = _num(closes[i] if i < len(closes) else None)
                 if close <= 0:

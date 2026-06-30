@@ -589,10 +589,11 @@ def test_yahoo_chart_last_rows_uses_overseas_proxy(monkeypatch) -> None:
     monkeypatch.setenv("PROXY_SECRET", "secret")
     monkeypatch.setattr("requests.get", fake_get)
 
-    rows = ms._yahoo_chart_last_rows(["NVDA"])
+    rows = ms._yahoo_chart_last_rows(["NVDA", "AVGO"])
 
     assert rows["NVDA"][-1]["close"] == 12.5
     assert rows["NVDA"][-1]["volume"] == 200
+    assert rows["AVGO"][-1]["close"] == 12.5
     assert calls[1][0] == "http://proxy.local/fetch"
     assert calls[1][1]["params"]["strategy"] == "raw"
     assert calls[1][1]["headers"]["X-Proxy-Key"] == "secret"
