@@ -545,6 +545,59 @@ def test_premarket_slot_datasets_match_data_timing() -> None:
     assert "stage_snapshot" in ms._premarket_slot_datasets("official-0850")
 
 
+def test_yahoo_chart_last_rows_uses_overseas_proxy(monkeypatch) -> None:
+    payload = {
+        "chart": {
+            "result": [
+                {
+                    "timestamp": [1782691200, 1782777600],
+                    "indicators": {
+                        "quote": [
+                            {
+                                "open": [10.0, 11.0],
+                                "high": [12.0, 13.0],
+                                "low": [9.0, 10.5],
+                                "close": [11.0, 12.5],
+                                "volume": [100, 200],
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    }
+
+    class Resp:
+        def __init__(self, data):
+            self._data = data
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._data
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        if "query1.finance.yahoo.com" in url:
+            raise RuntimeError("rate limited")
+        return Resp({"content": ms.json.dumps(payload)})
+
+    monkeypatch.setenv("OVERSEAS_PROXY_URL", "http://proxy.local")
+    monkeypatch.setenv("PROXY_SECRET", "secret")
+    monkeypatch.setattr("requests.get", fake_get)
+
+    rows = ms._yahoo_chart_last_rows(["NVDA"])
+
+    assert rows["NVDA"][-1]["close"] == 12.5
+    assert rows["NVDA"][-1]["volume"] == 200
+    assert calls[1][0] == "http://proxy.local/fetch"
+    assert calls[1][1]["params"]["strategy"] == "json"
+    assert calls[1][1]["headers"]["X-Proxy-Key"] == "secret"
+
+
 def test_maybe_run_premarket_sync_runs_official_after_warmup(store: MarketStore) -> None:
     from datetime import datetime
 

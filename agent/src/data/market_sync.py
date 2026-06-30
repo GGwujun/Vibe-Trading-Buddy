@@ -2863,28 +2863,107 @@ def _yf_last_rows(symbols: list[str], *, period: str = "10d") -> dict[str, list[
         import yfinance as yf
     except Exception as exc:  # noqa: BLE001
         logger.debug("yfinance unavailable: %s", exc)
-        return {}
+        yf = None
     out: dict[str, list[dict[str, Any]]] = {}
-    for symbol in symbols:
+    if yf is not None:
+        for symbol in symbols:
+            try:
+                hist = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=False)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("yfinance history failed for %s: %s", symbol, exc)
+                continue
+            if hist is None or hist.empty:
+                continue
+            rows: list[dict[str, Any]] = []
+            for idx, r in hist.tail(8).iterrows():
+                rows.append({
+                    "trade_date": idx.strftime("%Y-%m-%d"),
+                    "open": _num(r.get("Open")),
+                    "high": _num(r.get("High")),
+                    "low": _num(r.get("Low")),
+                    "close": _num(r.get("Close")),
+                    "volume": _num(r.get("Volume")),
+                })
+            if rows:
+                out[symbol] = rows
+    missing = [symbol for symbol in symbols if symbol not in out]
+    if missing:
+        out.update(_yahoo_chart_last_rows(missing, period=period))
+    return out
+
+
+def _yahoo_chart_last_rows(symbols: list[str], *, period: str = "10d") -> dict[str, list[dict[str, Any]]]:
+    """Fallback daily bars via Yahoo chart JSON, optionally through overseas proxy.
+
+    The production CN host frequently gets Yahoo/yfinance 403/429 responses.
+    The overseas proxy is already part of the deployment for foreign sources,
+    so use it as a second leg and keep the returned row shape identical to
+    ``_yf_last_rows``.
+    """
+    import requests
+    from urllib.parse import quote
+
+    out: dict[str, list[dict[str, Any]]] = {}
+    range_arg = "10d" if period == "10d" else period
+    headers = {"User-Agent": "Mozilla/5.0"}
+    proxy = os.getenv("OVERSEAS_PROXY_URL", "").strip().rstrip("/")
+    secret = os.getenv("PROXY_SECRET", "").strip()
+
+    def _fetch_json(url: str) -> dict[str, Any] | None:
         try:
-            hist = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=False)
+            resp = requests.get(url, headers=headers, timeout=12)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as direct_exc:  # noqa: BLE001
+            logger.debug("yahoo chart direct failed for %s: %s", url, direct_exc)
+        if not proxy or not secret:
+            return None
+        try:
+            resp = requests.get(
+                f"{proxy}/fetch",
+                params={"url": url, "strategy": "json"},
+                headers={"X-Proxy-Key": secret},
+                timeout=20,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            content = payload.get("content")
+            return json.loads(content) if isinstance(content, str) else None
+        except Exception as proxy_exc:  # noqa: BLE001
+            logger.debug("yahoo chart proxy failed for %s: %s", url, proxy_exc)
+            return None
+
+    for symbol in symbols:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol, safe='')}?range={range_arg}&interval=1d"
+        payload = _fetch_json(url)
+        try:
+            result = ((payload or {}).get("chart") or {}).get("result") or []
+            item = result[0]
+            timestamps = item.get("timestamp") or []
+            quote = (((item.get("indicators") or {}).get("quote") or [{}])[0]) or {}
+            rows: list[dict[str, Any]] = []
+            start = max(0, len(timestamps) - 8)
+            opens = quote.get("open") or []
+            highs = quote.get("high") or []
+            lows = quote.get("low") or []
+            closes = quote.get("close") or []
+            volumes = quote.get("volume") or []
+            for i, ts in enumerate(timestamps[start:], start=start):
+                close = _num(closes[i] if i < len(closes) else None)
+                if close <= 0:
+                    continue
+                rows.append({
+                    "trade_date": datetime.fromtimestamp(int(ts), timezone.utc).strftime("%Y-%m-%d"),
+                    "open": _num(opens[i] if i < len(opens) else None),
+                    "high": _num(highs[i] if i < len(highs) else None),
+                    "low": _num(lows[i] if i < len(lows) else None),
+                    "close": close,
+                    "volume": _num(volumes[i] if i < len(volumes) else None),
+                })
+            if rows:
+                out[symbol] = rows
         except Exception as exc:  # noqa: BLE001
-            logger.debug("yfinance history failed for %s: %s", symbol, exc)
-            continue
-        if hist is None or hist.empty:
-            continue
-        rows: list[dict[str, Any]] = []
-        for idx, r in hist.tail(8).iterrows():
-            rows.append({
-                "trade_date": idx.strftime("%Y-%m-%d"),
-                "open": _num(r.get("Open")),
-                "high": _num(r.get("High")),
-                "low": _num(r.get("Low")),
-                "close": _num(r.get("Close")),
-                "volume": _num(r.get("Volume")),
-            })
-        if rows:
-            out[symbol] = rows
+            logger.debug("yahoo chart parse failed for %s: %s", symbol, exc)
     return out
 
 
