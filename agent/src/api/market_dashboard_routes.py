@@ -70,7 +70,7 @@ def _stage_payload_with_freshness(stage: str, snapshot: dict[str, Any]) -> dict[
     except Exception:  # noqa: BLE001
         is_today_trading = _now_cst().weekday() < 5
     payload["expected_trade_date"] = today if is_today_trading else snapshot.get("trade_date")
-    payload["freshness_policy"] = "trading-day premarket snapshot; generated after 07:30 CST"
+    payload["freshness_policy"] = "trading-day premarket snapshot; overseas data after 05:30 CST, warmup after 07:30 CST, official refresh after 08:50 CST"
     payload["is_stale"] = bool(is_today_trading and snapshot.get("trade_date") != today)
     if payload["is_stale"]:
         missing = set(payload.get("missing_tables") or [])

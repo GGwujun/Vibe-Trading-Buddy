@@ -526,3 +526,36 @@ def test_maybe_run_sync_runs_at_post_close(store: MarketStore) -> None:
     assert m_run.call_count == 1
     # daemon:<today> meta should now be set.
     assert store.get_meta(f"daemon:{today}") is not None
+
+
+def test_premarket_sync_slot_boundaries() -> None:
+    from datetime import time
+
+    assert ms._premarket_sync_slot(time(5, 29)) is None
+    assert ms._premarket_sync_slot(time(5, 30)) == "overnight-0530"
+    assert ms._premarket_sync_slot(time(7, 29)) == "overnight-0530"
+    assert ms._premarket_sync_slot(time(7, 30)) == "warmup-0730"
+    assert ms._premarket_sync_slot(time(8, 49)) == "warmup-0730"
+    assert ms._premarket_sync_slot(time(8, 50)) == "official-0850"
+
+
+def test_premarket_slot_datasets_match_data_timing() -> None:
+    assert ms._premarket_slot_datasets("overnight-0530") == {"global_indices", "us_theme", "us_transmission"}
+    assert "premarket_news" in ms._premarket_slot_datasets("warmup-0730")
+    assert "stage_snapshot" in ms._premarket_slot_datasets("official-0850")
+
+
+def test_maybe_run_premarket_sync_runs_official_after_warmup(store: MarketStore) -> None:
+    from datetime import datetime
+
+    today = "2026-06-30"
+    store.set_meta(f"daemon:premarket:{today}:warmup-0730", "ts")
+    now = datetime(2026, 6, 30, 8, 50, tzinfo=ms._CST)
+    with mock.patch.object(ms, "_now_cst", return_value=now), \
+         mock.patch("src.data.trade_calendar.is_trading_day", return_value=True), \
+         mock.patch("src.data.trade_calendar.cn_market_phase", return_value="pre_open"), \
+         mock.patch.object(ms, "run_daily_sync", return_value={"stage_snapshot": 4}) as m_run:
+        ms._maybe_run_premarket_sync(store)
+
+    assert m_run.call_count == 1
+    assert store.get_meta(f"daemon:premarket:{today}:official-0850") is not None

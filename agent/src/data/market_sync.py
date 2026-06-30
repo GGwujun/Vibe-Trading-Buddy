@@ -4400,6 +4400,12 @@ def _maybe_run_daily_sync(store: MarketStore) -> None:
 
 
 _PREMARKET_DATASETS = {"global_indices", "us_theme", "us_transmission", "premarket_news", "stage_snapshot"}
+_PREMARKET_OVERNIGHT_DATASETS = {"global_indices", "us_theme", "us_transmission"}
+_PREMARKET_WARMUP_DATASETS = {"global_indices", "us_theme", "us_transmission", "premarket_news", "stage_snapshot"}
+_PREMARKET_OFFICIAL_DATASETS = _PREMARKET_DATASETS
+_PREMARKET_OVERNIGHT_TIME = (5, 30)
+_PREMARKET_WARMUP_TIME = (7, 30)
+_PREMARKET_OFFICIAL_TIME = (8, 50)
 _INTRADAY_DATASETS = {
     "realtime",
     "pool",
@@ -4412,30 +4418,52 @@ _INTRADAY_DATASETS = {
 _INTRADAY_SYNC_INTERVAL_MINUTES = 5
 
 
+def _premarket_sync_slot(now_time: Any) -> str | None:
+    """Return the due premarket slot name for the current CST time."""
+    from datetime import time as _time
+
+    if now_time >= _time(*_PREMARKET_OFFICIAL_TIME):
+        return "official-0850"
+    if now_time >= _time(*_PREMARKET_WARMUP_TIME):
+        return "warmup-0730"
+    if now_time >= _time(*_PREMARKET_OVERNIGHT_TIME):
+        return "overnight-0530"
+    return None
+
+
+def _premarket_slot_datasets(slot: str) -> set[str]:
+    if slot == "overnight-0530":
+        return set(_PREMARKET_OVERNIGHT_DATASETS)
+    if slot == "warmup-0730":
+        return set(_PREMARKET_WARMUP_DATASETS)
+    return set(_PREMARKET_OFFICIAL_DATASETS)
+
+
 def _maybe_run_premarket_sync(store: MarketStore) -> None:
     """Generate today's morning brief before the A-share open.
 
-    This is intentionally small and DB-backed: it prepares the stage snapshot
-    before users open the page, while the page itself only reads the snapshot.
+    The 07:30 warmup prepares a draft; the 08:50 official slot refreshes it
+    shortly before users open the market page. Each slot is idempotent.
     """
-    from datetime import time as _time
-
     from src.data.trade_calendar import cn_market_phase, is_trading_day
 
     now = _now_cst()
     today = now.strftime("%Y-%m-%d")
     if not is_trading_day(today):
         return
-    if cn_market_phase(now) != "pre_open" or now.time() < _time(7, 30):
+    if cn_market_phase(now) != "pre_open":
         return
-    meta_key = f"daemon:premarket:{today}"
+    slot = _premarket_sync_slot(now.time())
+    if slot is None:
+        return
+    meta_key = f"daemon:premarket:{today}:{slot}"
     if store.get_meta(meta_key):
         return
     try:
-        logger.info("market-sync daemon: starting premarket sync for %s", today)
-        run_daily_sync(today, store=store, datasets=_PREMARKET_DATASETS, deadline_seconds=180)
+        logger.info("market-sync daemon: starting premarket sync for %s slot=%s", today, slot)
+        run_daily_sync(today, store=store, datasets=_premarket_slot_datasets(slot), deadline_seconds=240)
         store.set_meta(meta_key, _now_cst().isoformat())
-        logger.info("market-sync daemon: premarket done for %s", today)
+        logger.info("market-sync daemon: premarket done for %s slot=%s", today, slot)
     except Exception:  # noqa: BLE001
         logger.exception("market-sync daemon premarket tick failed")
 
