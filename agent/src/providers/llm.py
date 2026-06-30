@@ -358,8 +358,12 @@ def _sync_provider_env() -> None:
     else:
         api_key = os.getenv("OPENAI_API_KEY", "") or "ollama"
 
-    # Resolve base URL: provider-specific env → OPENAI_BASE_URL fallback
-    base_url = os.getenv(base_env, "") or os.getenv("OPENAI_BASE_URL", "") or os.getenv("OPENAI_API_BASE", "")
+    # Resolve base URL: provider-specific env → OPENAI_BASE_URL fallback.
+    # When a non-openai provider is selected, its own base URL must win over a
+    # stale OPENAI_BASE_URL left by another provider. Otherwise provider=deepseek
+    # can silently keep sending requests to a BigModel/OpenAI-compatible relay.
+    provider_base_url = os.getenv(base_env, "")
+    base_url = provider_base_url or os.getenv("OPENAI_BASE_URL", "") or os.getenv("OPENAI_API_BASE", "")
     if provider == "ollama" and base_url:
         base_url = _normalize_ollama_base_url(base_url)
 
@@ -367,7 +371,10 @@ def _sync_provider_env() -> None:
         os.environ["OPENAI_API_KEY"] = api_key
     if base_url:
         os.environ["OPENAI_API_BASE"] = base_url
-        os.environ.setdefault("OPENAI_BASE_URL", base_url)
+        if provider != "openai" or provider_base_url:
+            os.environ["OPENAI_BASE_URL"] = base_url
+        else:
+            os.environ.setdefault("OPENAI_BASE_URL", base_url)
 
 
 def build_llm(*, model_name: Optional[str] = None, callbacks: Any = None) -> Any:
