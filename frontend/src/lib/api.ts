@@ -305,6 +305,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  getPositionAnalysisSnapshot: (symbols: string[]) => {
+    const q = new URLSearchParams();
+    symbols.forEach((symbol) => q.append("symbols", symbol));
+    return request<PositionAnalysisSnapshotResponse>(`/position/analysis-snapshot?${q.toString()}`);
+  },
+  refreshPositionAnalysis: (symbols: string[]) =>
+    request<PositionAnalysisSnapshotResponse & { refresh_started?: boolean }>("/position/analysis-refresh", {
+      method: "POST",
+      body: JSON.stringify({ symbols, _cache_bust: Date.now() }),
+    }),
   // AI-driven position analysis via AgentLoop (SSE stream)
   aiAnalyzePosition: (code: string, signal: PositionSignal, position?: { cost: number; shares: number }) =>
     fetch(`${BASE}/position/ai-analysis`, {
@@ -1383,6 +1393,18 @@ export interface AnalyzeResponse {
   signals: PositionSignal[];
   index?: IndexInfo | null;
   updated_at: string;
+}
+
+export interface PositionAnalysisSnapshotResponse {
+  status: "ready" | "missing" | "error" | string;
+  key: string;
+  symbols: string[];
+  refreshing: boolean;
+  snapshot_updated_at?: string | null;
+  refresh_started_at?: string | null;
+  refresh_finished_at?: string | null;
+  error?: string | null;
+  data: AnalyzeResponse;
 }
 
 export interface SnapshotResponse {

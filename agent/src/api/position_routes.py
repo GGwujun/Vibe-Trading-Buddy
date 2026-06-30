@@ -1388,15 +1388,78 @@ def register_position_routes(
         # Default guess for unknown prefixes (ETFs: 51x, 56x, 58x etc.)
         return s + ".SH"
 
+    def _normalize_symbols_or_400(raw_symbols: list[str]) -> list[str]:
+        symbols = [_normalize_symbol(s) for s in raw_symbols]
+        symbols = list(dict.fromkeys([s for s in symbols if s]))
+        if not symbols:
+            raise HTTPException(status_code=400, detail="No valid A-share symbols (e.g. 000001 or 000001.SZ)")
+        return symbols
+
+    def _snapshot_response(symbols: list[str]) -> dict[str, Any]:
+        from src.data.market_store import get_market_store
+
+        store = get_market_store()
+        key = store.position_analysis_key(symbols) if store else ",".join(sorted(symbols))
+        snapshot = store.get_position_analysis_snapshot(symbols) if store else None
+        payload = snapshot.get("payload") if snapshot else None
+        status = snapshot.get("status", "ready") if snapshot else "missing"
+        return {
+            "status": status,
+            "key": key,
+            "symbols": symbols,
+            "refreshing": status == "refreshing",
+            "snapshot_updated_at": snapshot.get("updated_at") if snapshot else None,
+            "refresh_started_at": snapshot.get("refresh_started_at") if snapshot else None,
+            "refresh_finished_at": snapshot.get("refresh_finished_at") if snapshot else None,
+            "error": snapshot.get("error") if snapshot else None,
+            "data": payload or {"signals": [], "index": None, "updated_at": None},
+        }
+
+    def _start_background_refresh(symbols: list[str], request: Request) -> bool:
+        from src.data.market_store import get_market_store
+
+        store = get_market_store()
+        if store is None:
+            raise HTTPException(status_code=503, detail="market store unavailable")
+        key = store.position_analysis_key(symbols)
+        if not store.mark_position_analysis_refreshing(symbols):
+            return False
+
+        def runner() -> None:
+            try:
+                body = AnalyzeRequest.model_validate({"symbols": symbols, "_cache_bust": time.time()})
+                asyncio.run(analyze_positions(request, body))
+            except Exception as exc:
+                logger.exception("Position analysis background refresh failed")
+                failed_store = get_market_store()
+                if failed_store is not None:
+                    failed_store.mark_position_analysis_error(symbols, str(exc))
+
+        threading.Thread(target=runner, name=f"position-analysis-refresh-{key[:8]}", daemon=True).start()
+        return True
+
+    @app.get("/position/analysis-snapshot", dependencies=[Depends(require_auth)])
+    async def get_position_analysis_snapshot(
+        request: Request,
+        symbols: list[str] = Query(default=[]),
+    ) -> dict[str, Any]:
+        normalized = _normalize_symbols_or_400(symbols)
+        return _snapshot_response(normalized)
+
+    @app.post("/position/analysis-refresh", dependencies=[Depends(require_auth)])
+    async def refresh_position_analysis(request: Request, body: AnalyzeRequest) -> dict[str, Any]:
+        symbols = _normalize_symbols_or_400(body.symbols)
+        started = _start_background_refresh(symbols, request)
+        response = _snapshot_response(symbols)
+        response["refresh_started"] = started
+        return response
+
 
     @app.post("/position/analyze", response_model=AnalyzeResponse, dependencies=[Depends(require_auth)])
     async def analyze_positions(request: Request, body: AnalyzeRequest) -> dict[str, Any]:
         global _ANALYSIS_CACHE
 
-        symbols = [_normalize_symbol(s) for s in body.symbols]
-        symbols = list(dict.fromkeys([s for s in symbols if s]))
-        if not symbols:
-            raise HTTPException(status_code=400, detail="No valid A-share symbols (e.g. 000001 or 000001.SZ)")
+        symbols = _normalize_symbols_or_400(body.symbols)
 
         cache_key = ",".join(sorted(symbols))
         # Manual refresh (non-zero _cache_bust) bypasses cache
@@ -1470,6 +1533,15 @@ def register_position_routes(
 
         with _CACHE_LOCK:
             _ANALYSIS_CACHE[cache_key] = {**payload, "_ts": time.time()}
+
+        try:
+            from src.data.market_store import get_market_store
+
+            store = get_market_store()
+            if store is not None:
+                store.upsert_position_analysis_snapshot(symbols, payload)
+        except Exception:
+            logger.debug("Position analysis snapshot save failed", exc_info=True)
 
         return payload
 

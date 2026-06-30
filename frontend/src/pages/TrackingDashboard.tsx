@@ -981,19 +981,34 @@ export function TrackingDashboard() {
       return;
     }
 
-    const body: { symbols: string[]; _cache_bust?: number } = { symbols: list.map((pos) => pos.symbol) };
-    if (!silent) body._cache_bust = Date.now();
-    api.analyzePositions(body)
+    const symbols = list.map((pos) => pos.symbol);
+    const request = silent ? api.getPositionAnalysisSnapshot(symbols) : api.refreshPositionAnalysis(symbols);
+    request
       .then((res) => {
-        setSignals(res.signals);
-        saveCachedSignals(res.signals);
-        setError(null);
-        setSelected((prev) => {
-          if (prev && res.signals.some((item) => item.symbol === prev.symbol)) {
-            return res.signals.find((item) => item.symbol === prev.symbol) ?? prev;
-          }
-          return res.signals[0] ?? null;
-        });
+        const nextSignals = res.data?.signals ?? [];
+        if (nextSignals.length) {
+          setSignals(nextSignals);
+          saveCachedSignals(nextSignals);
+          setError(null);
+          setSelected((prev) => {
+            if (prev && nextSignals.some((item) => item.symbol === prev.symbol)) {
+              return nextSignals.find((item) => item.symbol === prev.symbol) ?? prev;
+            }
+            return nextSignals[0] ?? null;
+          });
+        }
+        if (res.status === "missing" && !res.refreshing) {
+          void api.refreshPositionAnalysis(symbols).catch(() => {});
+        }
+        if (res.status === "error" && res.error) {
+          if (!signalsRef.current.length) setError(res.error);
+          else toast.error(res.error);
+        }
+        if (res.refreshing || (res.status === "missing" && !nextSignals.length)) {
+          window.setTimeout(() => analyze(true), 2000);
+        } else if (!silent) {
+          window.setTimeout(() => analyze(true), 1500);
+        }
       })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : "分析失败";
@@ -1057,12 +1072,16 @@ export function TrackingDashboard() {
       .createTrackingTask({ symbol: code, horizon: "短线", time: "15:05", enabled: true })
       .catch(() => {});
     setLoading(true);
-    api.analyzePositions({ symbols: next.map((pos) => pos.symbol) })
+    api.refreshPositionAnalysis(next.map((pos) => pos.symbol))
       .then((res) => {
-        setSignals(res.signals);
-        saveCachedSignals(res.signals);
+        const nextSignals = res.data?.signals ?? [];
+        if (nextSignals.length) {
+          setSignals(nextSignals);
+          saveCachedSignals(nextSignals);
+        }
         setError(null);
-        setSelected(res.signals.find((item) => item.symbol === code) ?? res.signals[0] ?? null);
+        setSelected(nextSignals.find((item) => item.symbol === code) ?? nextSignals[0] ?? null);
+        window.setTimeout(() => analyze(true), 1500);
       })
       .catch((err) => setError(err instanceof Error ? err.message : "分析失败"))
       .finally(() => setLoading(false));
@@ -1080,11 +1099,15 @@ export function TrackingDashboard() {
       setSignals([]);
       return;
     }
-    api.analyzePositions({ symbols: next.map((pos) => pos.symbol) })
+    api.refreshPositionAnalysis(next.map((pos) => pos.symbol))
       .then((res) => {
-        setSignals(res.signals);
-        saveCachedSignals(res.signals);
-        setSelected((prev) => prev && res.signals.some((item) => item.symbol === prev.symbol) ? prev : res.signals[0] ?? null);
+        const nextSignals = res.data?.signals ?? [];
+        if (nextSignals.length) {
+          setSignals(nextSignals);
+          saveCachedSignals(nextSignals);
+          setSelected((prev) => prev && nextSignals.some((item) => item.symbol === prev.symbol) ? prev : nextSignals[0] ?? null);
+        }
+        window.setTimeout(() => analyze(true), 1500);
       })
       .catch(() => {});
   };

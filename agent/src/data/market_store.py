@@ -330,6 +330,18 @@ CREATE TABLE IF NOT EXISTS market_stage_snapshot (
 );
 CREATE INDEX IF NOT EXISTS idx_market_stage_snapshot_stage_date ON market_stage_snapshot(stage, trade_date);
 
+CREATE TABLE IF NOT EXISTS position_analysis_snapshot (
+    snapshot_key TEXT PRIMARY KEY,
+    symbols_json TEXT NOT NULL,
+    payload_json TEXT,
+    status TEXT NOT NULL DEFAULT 'missing',
+    error TEXT,
+    refresh_started_at TEXT,
+    refresh_finished_at TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_position_analysis_status ON position_analysis_snapshot(status, updated_at);
+
 CREATE TABLE IF NOT EXISTS stock_pool (
     pool_type TEXT NOT NULL, trade_date TEXT NOT NULL, code TEXT NOT NULL,
     extra_json TEXT, updated_at TEXT NOT NULL,
@@ -1929,6 +1941,135 @@ class MarketStore:
             "source_tables": source_tables,
             "updated_at": row["updated_at"],
         }
+
+    # ------------------------------------------------------------------
+    # Position analysis snapshots (tracking dashboard)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def position_analysis_key(symbols: list[str]) -> str:
+        return ",".join(sorted({str(symbol or "").strip().upper() for symbol in symbols if symbol}))
+
+    def _position_analysis_row_to_snapshot(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        try:
+            symbols = json.loads(row["symbols_json"] or "[]")
+        except (TypeError, ValueError):
+            symbols = []
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        return {
+            "key": row["snapshot_key"],
+            "symbols": symbols if isinstance(symbols, list) else [],
+            "payload": payload if isinstance(payload, dict) else {},
+            "status": row["status"],
+            "error": row["error"],
+            "refresh_started_at": row["refresh_started_at"],
+            "refresh_finished_at": row["refresh_finished_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    @_synchronized
+    def get_position_analysis_snapshot(self, symbols: list[str]) -> dict[str, Any] | None:
+        key = self.position_analysis_key(symbols)
+        row = self._conn.execute(
+            "SELECT snapshot_key, symbols_json, payload_json, status, error, "
+            "refresh_started_at, refresh_finished_at, updated_at "
+            "FROM position_analysis_snapshot WHERE snapshot_key = ?",
+            (key,),
+        ).fetchone()
+        return self._position_analysis_row_to_snapshot(row)
+
+    @_synchronized
+    def mark_position_analysis_refreshing(self, symbols: list[str]) -> bool:
+        key = self.position_analysis_key(symbols)
+        normalized = sorted({str(symbol or "").strip().upper() for symbol in symbols if symbol})
+        now = _now_iso()
+        with self._write_transaction():
+            row = self._conn.execute(
+                "SELECT status FROM position_analysis_snapshot WHERE snapshot_key = ?",
+                (key,),
+            ).fetchone()
+            if row and row["status"] == "refreshing":
+                return False
+            if row:
+                self._conn.execute(
+                    "UPDATE position_analysis_snapshot "
+                    "SET symbols_json = ?, status = 'refreshing', error = NULL, "
+                    "refresh_started_at = ?, updated_at = ? WHERE snapshot_key = ?",
+                    (json.dumps(normalized, ensure_ascii=False), now, now, key),
+                )
+            else:
+                self._conn.execute(
+                    "INSERT INTO position_analysis_snapshot "
+                    "(snapshot_key, symbols_json, payload_json, status, error, "
+                    "refresh_started_at, refresh_finished_at, updated_at) "
+                    "VALUES (?, ?, NULL, 'refreshing', NULL, ?, NULL, ?)",
+                    (key, json.dumps(normalized, ensure_ascii=False), now, now),
+                )
+        return True
+
+    @_synchronized
+    def upsert_position_analysis_snapshot(
+        self,
+        symbols: list[str],
+        payload: dict[str, Any],
+        *,
+        status: str = "ready",
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        key = self.position_analysis_key(symbols)
+        normalized = sorted({str(symbol or "").strip().upper() for symbol in symbols if symbol})
+        now = _now_iso()
+        with self._write_transaction():
+            self._conn.execute(
+                "INSERT OR REPLACE INTO position_analysis_snapshot "
+                "(snapshot_key, symbols_json, payload_json, status, error, "
+                "refresh_started_at, refresh_finished_at, updated_at) "
+                "VALUES ("
+                "?, ?, ?, ?, ?, "
+                "COALESCE((SELECT refresh_started_at FROM position_analysis_snapshot WHERE snapshot_key = ?), ?), "
+                "?, ?"
+                ")",
+                (
+                    key,
+                    json.dumps(normalized, ensure_ascii=False),
+                    json.dumps(payload, ensure_ascii=False),
+                    status,
+                    error,
+                    key,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+        snapshot = self.get_position_analysis_snapshot(symbols)
+        return snapshot or {
+            "key": key,
+            "symbols": normalized,
+            "payload": payload,
+            "status": status,
+            "error": error,
+            "refresh_started_at": now,
+            "refresh_finished_at": now,
+            "updated_at": now,
+        }
+
+    @_synchronized
+    def mark_position_analysis_error(self, symbols: list[str], error: str) -> dict[str, Any] | None:
+        key = self.position_analysis_key(symbols)
+        now = _now_iso()
+        with self._write_transaction():
+            self._conn.execute(
+                "UPDATE position_analysis_snapshot "
+                "SET status = 'error', error = ?, refresh_finished_at = ?, updated_at = ? "
+                "WHERE snapshot_key = ?",
+                (error, now, now, key),
+            )
+        return self.get_position_analysis_snapshot(symbols)
 
     # ------------------------------------------------------------------
     # Stock pool (limit-up / limit-down / strong / fire / new)
