@@ -1337,22 +1337,29 @@ def _sync_index_daily_akshare_missing(
     # --- the rest: realtime spot (frozen close = trade_date settle on holidays) ---
     spot_codes = [c for c in missing if c != "899050.BJ"]
     if spot_codes:
-        # index_daily code -> akshare spot 代码 (前6位)
-        want = {c.replace(".SH", "").replace(".SZ", "").replace(".BJ", ""): c for c in spot_codes}
+        # index_daily code -> bare six-digit spot code. Providers may return
+        # either "000001" or prefixed forms such as "sh000001".
+        want = {"".join(ch for ch in c if ch.isdigit())[-6:]: c for c in spot_codes}
+        df = None
         try:
             df = ak.stock_zh_index_spot_em(symbol="沪深重要指数")
         except Exception as exc:  # noqa: BLE001
             logger.debug("akshare index spot failed for %s: %s", trade_date, exc)
-            df = None
+        if df is None or df.empty:
+            try:
+                df = ak.stock_zh_index_spot_sina()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("akshare sina index spot failed for %s: %s", trade_date, exc)
+                df = None
         if df is not None and not df.empty:
             cols = list(df.columns)
-            code_col = "代码" if "代码" in cols else cols[0]
-            close_col = next((c for c in cols if "最新价" in c), None)
-            pct_col = next((c for c in cols if "涨跌幅" in c), None)
+            code_col = next((c for c in cols if c in {"代码", "code", "symbol"}), cols[0] if cols else None)
+            close_col = next((c for c in cols if c in {"最新价", "最新", "price", "close"}), cols[2] if len(cols) > 2 else None)
+            pct_col = next((c for c in cols if c in {"涨跌幅", "change_pct", "pct_chg"}), cols[4] if len(cols) > 4 else None)
             if code_col and close_col:
                 rows_by_code: dict[str, dict] = {}
                 for _, r in df.iterrows():
-                    ak_code = str(r[code_col]).strip()
+                    ak_code = "".join(ch for ch in str(r[code_col]).strip() if ch.isdigit())[-6:]
                     idx_code = want.get(ak_code)
                     if not idx_code:
                         continue

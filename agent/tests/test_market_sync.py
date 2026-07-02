@@ -555,6 +555,36 @@ def test_index_daily_fills_missing_core_indices_after_partial_tushare(store: Mar
     assert store.has_index_daily("399001.SZ", "2026-06-24")
 
 
+def test_index_daily_akshare_missing_falls_back_to_sina_prefixed_codes(store: MarketStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    import pandas as pd
+
+    class FakeAk:
+        @staticmethod
+        def stock_zh_index_spot_em(symbol: str):
+            raise ConnectionError("em down")
+
+        @staticmethod
+        def stock_zh_index_spot_sina():
+            return pd.DataFrame(
+                [
+                    {"代码": "sh000001", "最新价": 3000.0, "涨跌幅": 1.2},
+                    {"代码": "sz399001", "最新价": 12000.0, "涨跌幅": -0.4},
+                ]
+            )
+
+    monkeypatch.setitem(sys.modules, "akshare", FakeAk)
+
+    written = ms._sync_index_daily_akshare_missing(
+        store,
+        "2026-06-24",
+        index_codes=["000001.SH", "399001.SZ"],
+    )
+
+    assert written == 2
+    assert store.has_index_daily("000001.SH", "2026-06-24")
+    assert store.has_index_daily("399001.SZ", "2026-06-24")
+
+
 def test_etf_master_falls_back_to_tpdog(store: MarketStore) -> None:
     def fake_call(path: str, **params):
         assert path == "etfs/list"
