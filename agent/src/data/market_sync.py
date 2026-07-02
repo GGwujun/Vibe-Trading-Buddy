@@ -1381,10 +1381,12 @@ def _sync_index_daily(
 ) -> int:
     selected_codes = index_codes or list(_DEFAULT_INDEX_CODES)
     written = _sync_index_daily_tushare(store, trade_date, index_codes=selected_codes)
-    if written:
+    missing_codes = [code for code in selected_codes if not store.has_index_daily(code, trade_date)]
+    if not missing_codes:
         return written
-    written = _sync_index_daily_tpdog(store, trade_date, index_codes=selected_codes)
-    written += _sync_index_daily_akshare_missing(store, trade_date, index_codes=selected_codes)
+    written += _sync_index_daily_tpdog(store, trade_date, index_codes=missing_codes)
+    missing_codes = [code for code in selected_codes if not store.has_index_daily(code, trade_date)]
+    written += _sync_index_daily_akshare_missing(store, trade_date, index_codes=missing_codes)
     return written
 
 

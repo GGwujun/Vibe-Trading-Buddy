@@ -520,6 +520,41 @@ def test_index_daily_defaults_to_all_core_indices_per_run(store: MarketStore) ->
     assert fake.calls == ["000001.SH", "399001.SZ"]
 
 
+def test_index_daily_fills_missing_core_indices_after_partial_tushare(store: MarketStore) -> None:
+    class FakeApi:
+        def index_daily(self, **kwargs):
+            import pandas as pd
+
+            if kwargs["ts_code"] == "000001.SH":
+                return pd.DataFrame(
+                    [
+                        {
+                            "ts_code": kwargs["ts_code"],
+                            "open": 1,
+                            "high": 2,
+                            "low": 1,
+                            "close": 2,
+                        }
+                    ]
+                )
+            return pd.DataFrame()
+
+    def fake_call(path: str, **params):
+        assert path == "stock/daily"
+        assert params["code"] == "zssz.399001"
+        return [{"date": params["date"], "open": 3, "high": 4, "low": 3, "close": 4, "volume": 100}]
+
+    with mock.patch.dict("os.environ", {"TUSHARE_TOKEN": "token"}), \
+         mock.patch("tushare.pro_api", return_value=FakeApi()), \
+         mock.patch.object(ms, "_DEFAULT_INDEX_CODES", ("000001.SH", "399001.SZ")), \
+         mock.patch("src.data.tpdog_client.call", side_effect=fake_call):
+        res = ms.run_daily_sync("2026-06-24", store=store, datasets={"index"})
+
+    assert res["index"] == 2
+    assert store.has_index_daily("000001.SH", "2026-06-24")
+    assert store.has_index_daily("399001.SZ", "2026-06-24")
+
+
 def test_etf_master_falls_back_to_tpdog(store: MarketStore) -> None:
     def fake_call(path: str, **params):
         assert path == "etfs/list"
