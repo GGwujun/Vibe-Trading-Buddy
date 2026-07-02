@@ -1379,22 +1379,12 @@ def _sync_index_daily(
     *,
     index_codes: Optional[list[str]] = None,
 ) -> int:
-    selected_codes = index_codes
-    if selected_codes is None:
-        all_codes = list(_DEFAULT_INDEX_CODES)
-        if all_codes:
-            try:
-                cursor = int(store.get_meta("index_daily:cursor") or "0")
-            except ValueError:
-                cursor = 0
-            selected_codes = [all_codes[cursor % len(all_codes)]]
-            store.set_meta("index_daily:cursor", str((cursor + 1) % len(all_codes)))
+    selected_codes = index_codes or list(_DEFAULT_INDEX_CODES)
     written = _sync_index_daily_tushare(store, trade_date, index_codes=selected_codes)
     if written:
         return written
-    fallback_codes = index_codes or list(_DEFAULT_INDEX_CODES)
-    written = _sync_index_daily_tpdog(store, trade_date, index_codes=fallback_codes)
-    written += _sync_index_daily_akshare_missing(store, trade_date, index_codes=fallback_codes)
+    written = _sync_index_daily_tpdog(store, trade_date, index_codes=selected_codes)
+    written += _sync_index_daily_akshare_missing(store, trade_date, index_codes=selected_codes)
     return written
 
 

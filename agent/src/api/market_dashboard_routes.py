@@ -13,7 +13,7 @@ from datetime import datetime, time, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 import pandas as pd
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Request, Response
 
 logger = logging.getLogger(__name__)
 
@@ -1066,13 +1066,27 @@ def _db_market_overview() -> dict[str, Any]:
         ).fetchone()
         if not r:
             continue
+        index_trade_date = r["trade_date"]
         index_rows.append({
             "symbol": r["code"],
             "name": name_map.get(r["code"], r["code"]),
             "price": round(float(r["close"] or 0), 2),
             "change_pct": round(float(r["pct_chg"] or 0), 2),
-            "trade_date": r["trade_date"],
+            "trade_date": index_trade_date,
+            "is_stale": bool(index_trade_date and index_trade_date < trade_date),
+            "expected_trade_date": trade_date,
         })
+
+    sector_trade_date = trade_date
+    hot_sectors = store.get_sector_snapshot(sector_trade_date, "concept", limit=10)
+    if not hot_sectors:
+        hot_sectors = store.get_sector_snapshot(sector_trade_date, "industry", limit=10)
+    if not hot_sectors:
+        sector_trade_date = store.latest_date("sector_snapshot")
+        if sector_trade_date:
+            hot_sectors = store.get_sector_snapshot(sector_trade_date, "concept", limit=10)
+            if not hot_sectors:
+                hot_sectors = store.get_sector_snapshot(sector_trade_date, "industry", limit=10)
 
     overview = {
         "as_of": _now_cst().isoformat(),
@@ -1088,7 +1102,9 @@ def _db_market_overview() -> dict[str, Any]:
             "turnover_billion": round(turnover / 100_000_000, 2),
         },
         "indices": index_rows,
-        "hot_sectors": [],
+        "hot_sectors": hot_sectors,
+        "sector_trade_date": sector_trade_date,
+        "sector_source": "sector_snapshot" if hot_sectors else None,
         "top_gainers": [_stock(r) for r in top[:8]],
         "top_losers": [_stock(r) for r in bottom[:8]],
     }
@@ -1903,7 +1919,9 @@ def register_market_dashboard_routes(
             require_event_stream_auth = host.require_event_stream_auth
 
     @app.get("/market-dashboard", dependencies=[Depends(require_auth)])
-    async def get_market_dashboard(request: Request) -> dict[str, Any]:
+    async def get_market_dashboard(request: Request, response: Response) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
         today = _today_cst()
         results = await asyncio.gather(
             _run_source("market_overview", _load_market_overview),
@@ -1974,7 +1992,9 @@ def register_market_dashboard_routes(
         }
 
     @app.get("/market-dashboard/stages/{stage}", dependencies=[Depends(require_auth)])
-    async def get_market_dashboard_stage(stage: str, request: Request) -> dict[str, Any]:
+    async def get_market_dashboard_stage(stage: str, request: Request, response: Response) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
         allowed = {"morning-brief", "intraday-monitor", "tail-strategy", "close-review"}
         stage_key = stage.strip().lower()
         if stage_key not in allowed:

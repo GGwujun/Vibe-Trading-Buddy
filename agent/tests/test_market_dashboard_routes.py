@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pandas as pd
 
 from src.api import market_dashboard_routes as routes
+from src.data.market_store import MarketStore
 
 
 def _auth():
@@ -312,6 +314,52 @@ def test_stock_spot_provisional_daily_bar_builds_intraday_daily(monkeypatch) -> 
     assert bar["volume"] == 1000.0
     assert bar["provisional"] is True
     assert bar["source"] == "akshare.stock_spot"
+
+
+def test_db_market_overview_uses_sector_snapshot_and_marks_stale_indices(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = MarketStore(tmp_path / "market.db")
+    try:
+        store.upsert_security_master([{"code": "600000.SH", "name": "浦发银行"}])
+        store.upsert_daily_bars(
+            "600000.SH",
+            [
+                {
+                    "date": "2026-07-02",
+                    "open": 10,
+                    "high": 11,
+                    "low": 9,
+                    "close": 10.5,
+                    "volume": 100,
+                    "total_amt": 1_000_000_000,
+                    "rise_rate": 2.5,
+                    "name": "浦发银行",
+                }
+            ],
+        )
+        store.upsert_sector_snapshot(
+            "2026-07-02",
+            "concept",
+            [{"name": "机器人", "change_pct": 3.2, "advancers": 12, "decliners": 3, "leader": "龙头"}],
+        )
+        store.upsert_index_daily(
+            "000001.SH",
+            [{"date": "2026-06-29", "close": 3000, "pct_chg": 0.5}],
+        )
+        monkeypatch.setattr(routes, "_market_store", lambda: store)
+
+        overview = routes._db_market_overview()
+    finally:
+        store._conn.close()
+
+    assert overview["trade_date"] == "2026-07-02"
+    assert overview["hot_sectors"][0]["name"] == "机器人"
+    assert overview["sector_trade_date"] == "2026-07-02"
+    assert overview["indices"][0]["symbol"] == "000001.SH"
+    assert overview["indices"][0]["is_stale"] is True
+    assert overview["indices"][0]["expected_trade_date"] == "2026-07-02"
 
 
 def test_stock_realtime_snapshot_bar_builds_intraday_daily() -> None:

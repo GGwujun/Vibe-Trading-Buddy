@@ -490,7 +490,7 @@ def test_etf_master_size_and_index_use_tushare(store: MarketStore) -> None:
     assert counts["index_daily"] == 1
 
 
-def test_index_daily_defaults_to_one_core_index_per_run(store: MarketStore) -> None:
+def test_index_daily_defaults_to_all_core_indices_per_run(store: MarketStore) -> None:
     class FakeApi:
         def __init__(self):
             self.calls = []
@@ -514,11 +514,9 @@ def test_index_daily_defaults_to_one_core_index_per_run(store: MarketStore) -> N
     with mock.patch.dict("os.environ", {"TUSHARE_TOKEN": "token"}), \
          mock.patch("tushare.pro_api", return_value=fake), \
          mock.patch.object(ms, "_DEFAULT_INDEX_CODES", ("000001.SH", "399001.SZ")):
-        first = ms.run_daily_sync("2026-06-24", store=store, datasets={"index"})
-        second = ms.run_daily_sync("2026-06-25", store=store, datasets={"index"})
+        res = ms.run_daily_sync("2026-06-24", store=store, datasets={"index"})
 
-    assert first["index"] == 1
-    assert second["index"] == 1
+    assert res["index"] == 2
     assert fake.calls == ["000001.SH", "399001.SZ"]
 
 
