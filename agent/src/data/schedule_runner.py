@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 from src.data import schedule_store
 
@@ -28,6 +28,60 @@ _CST = timezone(timedelta(hours=8))
 _TICK_SECONDS = 30
 # In-memory dedupe: keys like "2026-06-15 14:30|000001.SZ". Reset each day.
 _FIRED_KEYS: set[str] = set()
+
+
+def _parse_hhmm(value: str | None) -> time | None:
+    try:
+        hh, mm = str(value or "").split(":", 1)
+        return time(int(hh), int(mm))
+    except Exception:
+        return None
+
+
+def _iso_date(value: str | None) -> str | None:
+    if not value:
+        return None
+    raw = str(value).strip()
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(_CST).strftime("%Y-%m-%d")
+    except Exception:
+        return raw[:10] if len(raw) >= 10 else None
+
+
+def _iso_time(value: str | None) -> time | None:
+    if not value:
+        return None
+    raw = str(value).strip()
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(_CST).time()
+    except Exception:
+        return None
+
+
+def _task_due_for_now(task: dict, now_cst: datetime) -> bool:
+    """Return whether a task should fire once for today's scheduled time.
+
+    The old scheduler only fired during the exact HH:MM minute. That made
+    daily analysis easy to miss after restarts or short outages. This predicate
+    catches up once after the scheduled time has passed, while avoiding an
+    immediate same-day run for a task created after its scheduled time.
+    """
+    if not task.get("enabled", False):
+        return False
+    scheduled_time = _parse_hhmm(task.get("time"))
+    if scheduled_time is None:
+        return False
+    today = now_cst.strftime("%Y-%m-%d")
+    if now_cst.time().replace(second=0, microsecond=0) < scheduled_time:
+        return False
+    if _iso_date(task.get("last_run_at")) == today:
+        return False
+
+    created_date = _iso_date(task.get("created_at"))
+    created_time = _iso_time(task.get("created_at"))
+    if created_date == today and created_time and created_time > scheduled_time:
+        return False
+    return True
 
 
 def _run_analysis_for_task(task: dict) -> dict:
@@ -86,7 +140,6 @@ async def run_scheduler_loop() -> None:
         try:
             await asyncio.sleep(_TICK_SECONDS)
             now_cst = datetime.now(_CST)
-            hhmm = now_cst.strftime("%H:%M")
             today = now_cst.strftime("%Y-%m-%d")
 
             # GC fired keys from prior days.
@@ -95,16 +148,15 @@ async def run_scheduler_loop() -> None:
 
             loop = asyncio.get_running_loop()
             for task in schedule_store.load_tasks():
-                if not task.get("enabled", False):
-                    continue
-                if task.get("time") != hhmm:
+                if not _task_due_for_now(task, now_cst):
                     continue
                 symbol = task.get("symbol", "")
-                key = f"{today} {hhmm}|{symbol}"
+                key = f"{today}|{task.get('task_id') or symbol}"
                 if key in _FIRED_KEYS:
                     continue
                 _FIRED_KEYS.add(key)
                 # Fire-and-forget in the thread pool; the loop stays responsive.
+                logger.info("scheduled-analysis dispatching %s for %s", task.get("time"), symbol)
                 loop.run_in_executor(None, _run_analysis_for_task, task)
         except asyncio.CancelledError:
             logger.info("scheduled-analysis loop cancelled")
