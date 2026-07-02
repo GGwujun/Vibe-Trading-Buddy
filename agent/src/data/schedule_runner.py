@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, time, timedelta, timezone
 
 from src.data import schedule_store
@@ -26,6 +27,10 @@ logger = logging.getLogger(__name__)
 _CST = timezone(timedelta(hours=8))
 
 _TICK_SECONDS = 30
+try:
+    _MAX_RUNS_PER_TICK = max(1, int(os.getenv("SCHEDULED_ANALYSIS_MAX_RUNS_PER_TICK", "1")))
+except ValueError:
+    _MAX_RUNS_PER_TICK = 1
 # In-memory dedupe: keys like "2026-06-15 14:30|000001.SZ". Reset each day.
 _FIRED_KEYS: set[str] = set()
 
@@ -147,7 +152,10 @@ async def run_scheduler_loop() -> None:
                 _FIRED_KEYS.difference_update(k for k in list(_FIRED_KEYS) if not k.startswith(today))
 
             loop = asyncio.get_running_loop()
+            dispatched = 0
             for task in schedule_store.load_tasks():
+                if dispatched >= _MAX_RUNS_PER_TICK:
+                    break
                 if not _task_due_for_now(task, now_cst):
                     continue
                 symbol = task.get("symbol", "")
@@ -155,9 +163,9 @@ async def run_scheduler_loop() -> None:
                 if key in _FIRED_KEYS:
                     continue
                 _FIRED_KEYS.add(key)
-                # Fire-and-forget in the thread pool; the loop stays responsive.
                 logger.info("scheduled-analysis dispatching %s for %s", task.get("time"), symbol)
-                loop.run_in_executor(None, _run_analysis_for_task, task)
+                await loop.run_in_executor(None, _run_analysis_for_task, task)
+                dispatched += 1
         except asyncio.CancelledError:
             logger.info("scheduled-analysis loop cancelled")
             break
