@@ -14,6 +14,7 @@ import re
 import sqlite3
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -29,8 +30,43 @@ _MAX_GENERATED = 5
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class RecommendationPhase:
+    id: str
+    label: str
+    analysis_slot: str
+    target_offset_days: int
+    status: str
+    hour: int
+    minute: int
+    final_for: str | None = None
+
+
+_PHASES: dict[str, RecommendationPhase] = {
+    "post_close_base": RecommendationPhase("post_close_base", "收盘基线", "afternoon", 1, "draft", 15, 45),
+    "evening_review": RecommendationPhase("evening_review", "晚间复核", "afternoon", 1, "draft", 21, 0),
+    "premarket_review": RecommendationPhase("premarket_review", "盘前复核", "morning", 0, "draft", 8, 15),
+    "morning_final": RecommendationPhase("morning_final", "早盘最终", "morning", 0, "final", 9, 24, "morning"),
+    "afternoon_final": RecommendationPhase("afternoon_final", "午盘最终", "afternoon", 0, "final", 14, 20, "afternoon"),
+    "manual": RecommendationPhase("manual", "手动生成", "manual", 0, "final", 0, 0),
+}
+_SLOT_ALIASES = {
+    "morning": "morning_final",
+    "am": "morning_final",
+    "0927": "morning_final",
+    "09:27": "morning_final",
+    "afternoon": "afternoon_final",
+    "pm": "afternoon_final",
+    "1430": "afternoon_final",
+    "14:30": "afternoon_final",
+    "manual": "manual",
+    "now": "manual",
+}
+_FINAL_PHASES = {phase.id for phase in _PHASES.values() if phase.status == "final"}
+
+
 class GenerateRecommendationsRequest(BaseModel):
-    slot: str = Field(..., description="morning, afternoon, or manual")
+    slot: str = Field(..., description="recommendation phase or legacy slot")
     limit: int = Field(default=5, ge=1, le=10)
 
 
@@ -42,19 +78,50 @@ def _today_cst() -> str:
     return _now_cst().strftime("%Y-%m-%d")
 
 
+def _normalize_phase(value: str) -> str:
+    phase_id = _SLOT_ALIASES.get(value.strip().lower(), value.strip().lower())
+    if phase_id in _PHASES:
+        return phase_id
+    raise HTTPException(status_code=400, detail=f"unknown recommendation phase: {value}")
+
+
 def _normalize_slot(slot: str) -> str:
-    value = slot.strip().lower()
-    if value in {"morning", "am", "0927", "09:27"}:
-        return "morning"
-    if value in {"afternoon", "pm", "1430", "14:30"}:
-        return "afternoon"
-    if value in {"manual", "now"}:
-        return "manual"
-    raise HTTPException(status_code=400, detail="slot must be morning, afternoon, or manual")
+    return _PHASES[_normalize_phase(slot)].analysis_slot
 
 
 def _slot_label(slot: str) -> str:
     return {"morning": "9:27", "afternoon": "14:30", "manual": "手动生成"}.get(slot, slot)
+
+
+def _slot_label(slot: str) -> str:
+    if slot in _PHASES:
+        return _PHASES[slot].label
+    return {"morning": "早盘", "afternoon": "午盘", "manual": "手动生成"}.get(slot, slot)
+
+
+def _phase_label(phase_id: str) -> str:
+    return _PHASES.get(phase_id, _PHASES["manual"]).label
+
+
+def _next_weekday(date_value: datetime) -> datetime:
+    cur = date_value
+    while cur.weekday() >= 5:
+        cur += timedelta(days=1)
+    return cur
+
+
+def _target_date_for_phase(phase_id: str, now: datetime | None = None) -> str:
+    phase = _PHASES[_normalize_phase(phase_id)]
+    base = now or _now_cst()
+    target = base + timedelta(days=phase.target_offset_days)
+    try:
+        from src.data.trade_calendar import is_trading_day
+
+        while not is_trading_day(target.strftime("%Y-%m-%d")):
+            target += timedelta(days=1)
+    except Exception:
+        target = _next_weekday(target)
+    return target.strftime("%Y-%m-%d")
 
 
 def _load_records() -> list[dict[str, Any]]:
@@ -62,7 +129,10 @@ def _load_records() -> list[dict[str, Any]]:
     try:
         with sqlite3.connect(_DB_PATH) as conn:
             rows = conn.execute(
-                "select payload from recommendations order by created_at desc, rank asc"
+                """
+                select payload from recommendations
+                order by target_date desc, created_at desc, generation_phase asc, rank asc
+                """
             ).fetchall()
         return [json.loads(row[0]) for row in rows]
     except Exception:
@@ -87,8 +157,9 @@ def _save_records(records: list[dict[str, Any]]) -> None:
             """
             insert into recommendations (
                 id, date, slot, symbol, rank, name, price_at_pick,
-                score, strategy, created_at, payload
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                score, strategy, created_at, target_date, generation_phase,
+                status, version, supersedes_id, final_for, payload
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             on conflict(id) do update set
                 date=excluded.date,
                 slot=excluded.slot,
@@ -99,6 +170,12 @@ def _save_records(records: list[dict[str, Any]]) -> None:
                 score=excluded.score,
                 strategy=excluded.strategy,
                 created_at=excluded.created_at,
+                target_date=excluded.target_date,
+                generation_phase=excluded.generation_phase,
+                status=excluded.status,
+                version=excluded.version,
+                supersedes_id=excluded.supersedes_id,
+                final_for=excluded.final_for,
                 payload=excluded.payload
             """,
             [
@@ -113,6 +190,12 @@ def _save_records(records: list[dict[str, Any]]) -> None:
                     float(r.get("score", 0) or 0),
                     r.get("strategy"),
                     r.get("created_at"),
+                    r.get("target_date") or r.get("date"),
+                    r.get("generation_phase") or r.get("slot"),
+                    r.get("status") or "final",
+                    int(r.get("version", 1) or 1),
+                    r.get("supersedes_id"),
+                    r.get("final_for"),
                     json.dumps(r, ensure_ascii=False),
                 )
                 for r in records
@@ -136,11 +219,34 @@ def _ensure_db() -> None:
                 score real not null,
                 strategy text not null,
                 created_at text not null,
+                target_date text not null,
+                generation_phase text not null,
+                status text not null,
+                version integer not null default 1,
+                supersedes_id text,
+                final_for text,
                 payload text not null
             )
             """
         )
+        columns = {row[1] for row in conn.execute("pragma table_info(recommendations)").fetchall()}
+        migrations = {
+            "target_date": "ALTER TABLE recommendations ADD COLUMN target_date text",
+            "generation_phase": "ALTER TABLE recommendations ADD COLUMN generation_phase text",
+            "status": "ALTER TABLE recommendations ADD COLUMN status text",
+            "version": "ALTER TABLE recommendations ADD COLUMN version integer NOT NULL DEFAULT 1",
+            "supersedes_id": "ALTER TABLE recommendations ADD COLUMN supersedes_id text",
+            "final_for": "ALTER TABLE recommendations ADD COLUMN final_for text",
+        }
+        for column, sql in migrations.items():
+            if column not in columns:
+                conn.execute(sql)
+        conn.execute("UPDATE recommendations SET target_date = COALESCE(target_date, date)")
+        conn.execute("UPDATE recommendations SET generation_phase = COALESCE(generation_phase, slot)")
+        conn.execute("UPDATE recommendations SET status = COALESCE(status, 'final')")
         conn.execute("create index if not exists idx_recs_date_slot on recommendations(date, slot)")
+        conn.execute("create index if not exists idx_recs_target_phase on recommendations(target_date, generation_phase, status)")
+        conn.execute("create index if not exists idx_recs_phase_symbol on recommendations(target_date, generation_phase, symbol)")
         conn.execute("create index if not exists idx_recs_symbol on recommendations(symbol)")
         count = conn.execute("select count(*) from recommendations").fetchone()[0]
     if count == 0:
@@ -151,8 +257,9 @@ def _ensure_db() -> None:
                     """
                     insert or replace into recommendations (
                         id, date, slot, symbol, rank, name, price_at_pick,
-                        score, strategy, created_at, payload
-                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        score, strategy, created_at, target_date, generation_phase,
+                        status, version, supersedes_id, final_for, payload
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -166,6 +273,12 @@ def _ensure_db() -> None:
                             float(r.get("score", 0) or 0),
                             r.get("strategy"),
                             r.get("created_at"),
+                            r.get("target_date") or r.get("date"),
+                            r.get("generation_phase") or r.get("slot"),
+                            r.get("status") or "final",
+                            int(r.get("version", 1) or 1),
+                            r.get("supersedes_id"),
+                            r.get("final_for"),
                             json.dumps(r, ensure_ascii=False),
                         )
                         for r in legacy
@@ -173,8 +286,8 @@ def _ensure_db() -> None:
                 )
 
 
-def _record_key(date: str, slot: str, symbol: str) -> str:
-    return f"{date}:{slot}:{symbol}"
+def _record_key(target_date: str, phase_id: str, symbol: str, version: int = 1) -> str:
+    return f"{target_date}:{phase_id}:v{version}:{symbol}"
 
 
 def _strategy_label(category_id: str) -> str:
@@ -191,21 +304,91 @@ def _slot_adjusted_score(item: dict[str, Any], slot: str) -> float:
     cat = item.get("category_id", "")
     change = float(item.get("change_pct", 0) or 0)
     if slot == "morning":
+        if cat == "trend":
+            score += 0.03
         if cat in {"breakout", "event"}:
-            score += 0.05
-        if change > 6:
             score -= 0.04
+        if change >= 6:
+            score -= 0.12
     elif slot == "afternoon":
-        if cat in {"trend", "breakout"}:
-            score += 0.05
+        if cat == "trend":
+            score += 0.07
+        elif cat == "breakout":
+            score += 0.02
         if change < 0:
             score -= 0.05
+        if change >= 6:
+            score -= 0.08
     return max(0.01, min(0.99, score))
+
+
+def _date_gap_days(older: str | None, newer: str | None) -> int | None:
+    if not older or not newer:
+        return None
+    try:
+        return (
+            datetime.strptime(newer[:10], "%Y-%m-%d")
+            - datetime.strptime(older[:10], "%Y-%m-%d")
+        ).days
+    except ValueError:
+        return None
+
+
+def _assert_candidate_market_data_fresh() -> None:
+    try:
+        from src.data.market_store import get_market_store
+
+        store = get_market_store()
+        if store is None:
+            return
+        _, latest_daily = store.date_range("bars_daily")
+        _, latest_realtime = store.date_range("realtime_quote_snapshot")
+    except Exception:
+        logger.debug("daily recommendation market freshness check failed", exc_info=True)
+        return
+
+    gap = _date_gap_days(latest_daily, latest_realtime)
+    if gap is not None and gap > 3:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Daily market data is stale "
+                f"(latest daily={latest_daily}, latest realtime={latest_realtime}); "
+                "wait for post-close sync before generating recommendations"
+            ),
+        )
+
+
+def _refresh_candidate_quote(item: dict[str, Any]) -> dict[str, Any]:
+    symbol = str(item.get("symbol", "")).upper()
+    if not symbol:
+        return item
+    try:
+        from src.data.market_data_service import normalize_code
+        from src.data.market_store import get_market_store
+
+        store = get_market_store()
+        quote = None if store is None else store.get_latest_realtime_quote(normalize_code(symbol), _today_cst())
+    except Exception:
+        logger.debug("daily recommendation quote refresh failed for %s", symbol, exc_info=True)
+        return item
+    if not quote:
+        return item
+    price = float(quote.get("price") or 0)
+    if price <= 0:
+        return item
+    item["price"] = price
+    if quote.get("rise_rate") is not None:
+        item["change_pct"] = float(quote.get("rise_rate") or 0)
+    item["quote_date"] = str(quote.get("trade_date") or "")[:10]
+    item["quote_source"] = quote.get("source")
+    return item
 
 
 def _candidate_pool(slot: str) -> list[dict[str, Any]]:
     from src.api.opportunity_routes import _build_opportunities
 
+    _assert_candidate_market_data_fresh()
     payload = _build_opportunities()
     if payload.get("error"):
         raise HTTPException(status_code=503, detail=str(payload["error"]))
@@ -218,6 +401,7 @@ def _candidate_pool(slot: str) -> list[dict[str, Any]]:
             item = dict(raw)
             item["category_id"] = category_id
             item["category_label"] = category_label
+            item = _refresh_candidate_quote(item)
             item["score"] = round(_slot_adjusted_score(item, slot), 3)
             items.append(item)
 
@@ -311,6 +495,128 @@ def _factor_review(item: dict[str, Any]) -> dict[str, Any]:
         return review
 
 
+def _market_regime_from_closes(closes: list[float]) -> dict[str, Any]:
+    clean = [float(value) for value in closes if float(value) > 0]
+    if len(clean) < 20:
+        return {"regime": "unknown", "score": 0.0, "reason": "insufficient_index_history"}
+    latest = clean[-1]
+    ma20 = sum(clean[-20:]) / 20
+    ma60 = sum(clean[-60:]) / 60 if len(clean) >= 60 else ma20
+    ret20 = (latest - clean[-20]) / clean[-20] * 100 if clean[-20] > 0 else 0.0
+    if latest < ma20 and (ma20 < ma60 or ret20 < -3):
+        return {
+            "regime": "risk_off",
+            "score": -1.0,
+            "reason": f"index below MA20, 20d={ret20:.2f}%",
+        }
+    if latest > ma20 and ma20 > ma60 and ret20 > 0:
+        return {
+            "regime": "risk_on",
+            "score": 1.0,
+            "reason": f"index above MA20/MA60, 20d={ret20:.2f}%",
+        }
+    return {
+        "regime": "neutral",
+        "score": 0.0,
+        "reason": f"mixed index trend, 20d={ret20:.2f}%",
+    }
+
+
+def _current_market_regime() -> dict[str, Any]:
+    try:
+        from src.data.market_store import get_market_store
+
+        store = get_market_store()
+        conn = getattr(store, "_conn", None)
+        if conn is None:
+            return {"regime": "unknown", "score": 0.0, "reason": "market_store_unavailable"}
+        for code in ("000300.SH", "000001.SH", "399001.SZ", "399006.SZ"):
+            rows = conn.execute(
+                "SELECT close FROM index_daily WHERE code = ? ORDER BY trade_date DESC LIMIT 60",
+                (code,),
+            ).fetchall()
+            closes = [float(row["close"]) for row in reversed(rows) if row["close"] is not None]
+            if len(closes) >= 20:
+                regime = _market_regime_from_closes(closes)
+                regime["index_code"] = code
+                return regime
+    except Exception:
+        logger.debug("daily recommendation market regime unavailable", exc_info=True)
+    return {"regime": "unknown", "score": 0.0, "reason": "index_data_unavailable"}
+
+
+def _apply_attribution_guardrails(
+    item: dict[str, Any],
+    slot: str,
+    market_regime: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    score = float(item.get("score", item.get("confidence", 0.5)) or 0.5)
+    category = str(item.get("category_id") or item.get("category") or "")
+    change = float(item.get("change_pct", 0) or 0)
+    factor_score = float((item.get("factor_review") or {}).get("score", 0.5) or 0.5)
+    ai_score = float((item.get("ai_review") or {}).get("score", 0.5) or 0.5)
+    adjustments: list[str] = []
+
+    if category == "trend":
+        score += 0.04
+        adjustments.append("trend_prior")
+    elif category == "breakout":
+        score -= 0.10
+        adjustments.append("breakout_drawdown_prior")
+    elif category == "event":
+        score -= 0.08
+        adjustments.append("event_low_sample_prior")
+
+    if slot == "morning":
+        score -= 0.04
+        adjustments.append("morning_prior")
+        if category in {"breakout", "event"}:
+            score -= 0.05
+            adjustments.append("morning_hot_signal_penalty")
+
+    if change >= 6:
+        score -= 0.12
+        adjustments.append("chase_high_penalty")
+    elif 0 <= change < 3:
+        score += 0.03
+        adjustments.append("moderate_intraday_move_prior")
+
+    if category in {"breakout", "event"} and factor_score < 0.70:
+        score -= 0.05
+        adjustments.append("weak_factor_confirmation")
+
+    if ai_score >= 0.75 and category in {"breakout", "event"}:
+        score -= 0.04
+        adjustments.append("ai_hot_signal_overconfidence_penalty")
+
+    regime = str((market_regime or {}).get("regime") or "unknown")
+    if regime == "risk_off":
+        if category in {"breakout", "event"}:
+            score -= 0.08
+            adjustments.append("risk_off_hot_signal_penalty")
+        elif category == "trend":
+            score -= 0.03
+            adjustments.append("risk_off_trend_penalty")
+        elif category == "oversold":
+            score += 0.02
+            adjustments.append("risk_off_oversold_prior")
+        if change >= 6:
+            score -= 0.04
+            adjustments.append("risk_off_chase_high_penalty")
+    elif regime == "risk_on":
+        if category == "trend":
+            score += 0.03
+            adjustments.append("risk_on_trend_bonus")
+        elif category == "breakout" and change < 6:
+            score += 0.02
+            adjustments.append("risk_on_moderate_breakout_bonus")
+
+    item["score"] = round(max(0.01, min(0.99, score)), 3)
+    item["attribution_adjustments"] = adjustments
+    item["market_regime"] = market_regime or {"regime": "unknown"}
+    return item
+
+
 def _ai_review_candidates(candidates: list[dict[str, Any]], slot: str, limit: int) -> dict[str, dict[str, Any]]:
     if not candidates:
         return {}
@@ -397,6 +703,7 @@ def _reviewed_candidates(slot: str, limit: int) -> list[dict[str, Any]]:
         item["pre_ai_score"] = round(max(0.01, min(0.99, base * 0.70 + factor_score * 0.30)), 3)
 
     ai_reviews = _ai_review_candidates(shortlist, slot, limit)
+    market_regime = _current_market_regime()
     reviewed: list[dict[str, Any]] = []
     for item in shortlist:
         symbol = str(item.get("symbol", "")).upper()
@@ -408,7 +715,8 @@ def _reviewed_candidates(slot: str, limit: int) -> list[dict[str, Any]]:
             max(0.01, min(0.99, float(item.get("pre_ai_score", 0.5)) * 0.45 + float(ai.get("score", 0.5)) * 0.55)),
             3,
         )
-        if ai.get("decision") == "recommend":
+        item = _apply_attribution_guardrails(item, slot, market_regime)
+        if ai.get("decision") == "recommend" and float(item.get("score", 0) or 0) >= 0.58:
             reviewed.append(item)
 
     if not reviewed:
@@ -417,10 +725,18 @@ def _reviewed_candidates(slot: str, limit: int) -> list[dict[str, Any]]:
     return reviewed
 
 
-def _make_record(item: dict[str, Any], slot: str, rank: int) -> dict[str, Any]:
+def _make_record(
+    item: dict[str, Any],
+    phase_id: str,
+    target_date: str,
+    rank: int,
+    version: int,
+) -> dict[str, Any]:
     now = _now_cst()
     symbol = str(item["symbol"]).upper()
     date = now.strftime("%Y-%m-%d")
+    phase = _PHASES[_normalize_phase(phase_id)]
+    slot = phase.analysis_slot
     ai_review = item.get("ai_review") or {}
     factor_review = item.get("factor_review") or {}
     ai_summary = str(ai_review.get("summary") or "").strip()
@@ -430,10 +746,17 @@ def _make_record(item: dict[str, Any], slot: str, rank: int) -> dict[str, Any]:
     reason = "；".join(reason_parts[:3]) or item.get("reason", "")
     risk_note = ai_risk or _risk_note(item)
     return {
-        "id": _record_key(date, slot, symbol),
+        "id": _record_key(target_date, phase.id, symbol, version),
         "date": date,
+        "target_date": target_date,
         "slot": slot,
         "slot_label": _slot_label(slot),
+        "generation_phase": phase.id,
+        "phase_label": phase.label,
+        "status": phase.status,
+        "version": version,
+        "supersedes_id": None,
+        "final_for": phase.final_for,
         "rank": rank,
         "symbol": symbol,
         "name": item.get("name", symbol),
@@ -446,6 +769,8 @@ def _make_record(item: dict[str, Any], slot: str, rank: int) -> dict[str, Any]:
         "risk_note": risk_note,
         "ai_review": ai_review,
         "factor_review": factor_review,
+        "attribution_adjustments": item.get("attribution_adjustments", []),
+        "market_regime": item.get("market_regime", {"regime": "unknown"}),
         "evidence_snapshot": _evidence_snapshot(item, slot, reason, risk_note, now),
         "recommendation_method": "ai_factor_review",
         "created_at": now.isoformat(),
@@ -647,27 +972,236 @@ def _summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _horizon_return(record: dict[str, Any], horizon: str) -> float | None:
+    perf = record.get("performance") or {}
+    point = perf.get(horizon)
+    if not isinstance(point, dict) or point.get("return_pct") is None:
+        return None
+    try:
+        return float(point["return_pct"])
+    except (TypeError, ValueError):
+        return None
+
+
+def _mean(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return round(sum(values) / len(values), 2)
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return round(ordered[mid], 2)
+    return round((ordered[mid - 1] + ordered[mid]) / 2, 2)
+
+
+def _performance_summary(records: list[dict[str, Any]], horizon: str = "t1") -> dict[str, Any]:
+    returns = [value for record in records if (value := _horizon_return(record, horizon)) is not None]
+    wins = [value for value in returns if value > 0]
+    losses = [value for value in returns if value <= 0]
+    avg_win = _mean(wins)
+    avg_loss = _mean(losses)
+    payoff = None
+    if avg_win is not None and avg_loss is not None and avg_loss != 0:
+        payoff = round(avg_win / abs(avg_loss), 2)
+    return {
+        "count": len(records),
+        "completed_count": len(returns),
+        "win_rate": round(len(wins) / len(returns) * 100, 1) if returns else None,
+        "avg_return": _mean(returns),
+        "median_return": _median(returns),
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "payoff_ratio": payoff,
+        "best_return": round(max(returns), 2) if returns else None,
+        "worst_return": round(min(returns), 2) if returns else None,
+    }
+
+
+def _score_bucket(value: Any) -> str:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    if score < 0.55:
+        return "<0.55"
+    if score < 0.65:
+        return "0.55-0.65"
+    if score < 0.75:
+        return "0.65-0.75"
+    return ">=0.75"
+
+
+def _change_bucket(value: Any) -> str:
+    try:
+        change = float(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    if change <= -2:
+        return "<=-2%"
+    if change < 0:
+        return "-2%-0%"
+    if change < 3:
+        return "0%-3%"
+    if change < 6:
+        return "3%-6%"
+    return ">=6%"
+
+
+def _dimension_value(record: dict[str, Any], dimension: str) -> str:
+    if dimension == "slot":
+        return str(record.get("slot") or "unknown")
+    if dimension == "generation_phase":
+        return str(record.get("generation_phase") or record.get("slot") or "unknown")
+    if dimension == "status":
+        return str(record.get("status") or "unknown")
+    if dimension == "category":
+        return str(record.get("category") or "unknown")
+    if dimension == "strategy":
+        return str(record.get("strategy") or "unknown")
+    if dimension == "rank":
+        try:
+            return f"rank_{int(record.get('rank') or 0)}"
+        except (TypeError, ValueError):
+            return "unknown"
+    if dimension == "score_bucket":
+        return _score_bucket(record.get("score"))
+    if dimension == "change_bucket":
+        return _change_bucket(record.get("change_pct_at_pick"))
+    if dimension == "ai_score_bucket":
+        return _score_bucket((record.get("ai_review") or {}).get("score"))
+    if dimension == "factor_score_bucket":
+        return _score_bucket((record.get("factor_review") or {}).get("score"))
+    return "unknown"
+
+
+def _attribution_rows(
+    records: list[dict[str, Any]],
+    dimension: str,
+    horizon: str = "t1",
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        groups.setdefault(_dimension_value(record, dimension), []).append(record)
+    rows = []
+    for key, grouped in groups.items():
+        rows.append({"dimension": dimension, "key": key, **_performance_summary(grouped, horizon)})
+    return sorted(
+        rows,
+        key=lambda row: (
+            -(row.get("completed_count") or 0),
+            row.get("avg_return") if row.get("avg_return") is not None else -999,
+        ),
+        reverse=False,
+    )
+
+
+def _recommendation_attribution(records: list[dict[str, Any]], horizon: str = "t1") -> dict[str, Any]:
+    if horizon not in {"t0", "t1", "t3", "t5"}:
+        raise HTTPException(status_code=400, detail="horizon must be one of t0, t1, t3, or t5")
+    dimensions = [
+        "slot",
+        "generation_phase",
+        "category",
+        "strategy",
+        "rank",
+        "score_bucket",
+        "change_bucket",
+        "ai_score_bucket",
+        "factor_score_bucket",
+    ]
+    by_dimension = {dimension: _attribution_rows(records, dimension, horizon) for dimension in dimensions}
+    completed_floor = max(3, int(len(records) * 0.05))
+    all_rows = [
+        row
+        for rows in by_dimension.values()
+        for row in rows
+        if (row.get("completed_count") or 0) >= completed_floor and row.get("avg_return") is not None
+    ]
+    weak_spots = sorted(all_rows, key=lambda row: (row["avg_return"], row["win_rate"] or 0))[:5]
+    strong_spots = sorted(all_rows, key=lambda row: (row["avg_return"], row["win_rate"] or 0), reverse=True)[:5]
+    return {
+        "horizon": horizon,
+        "summary": _performance_summary(records, horizon),
+        "by_dimension": by_dimension,
+        "weak_spots": weak_spots,
+        "strong_spots": strong_spots,
+        "min_completed_for_spots": completed_floor,
+    }
+
+
 def _has_slot_record(records: list[dict[str, Any]], date: str, slot: str) -> bool:
     return any(r.get("date") == date and r.get("slot") == slot for r in records)
 
 
-def _generate_for_slot(slot: str, limit: int) -> list[dict[str, Any]]:
-    slot = _normalize_slot(slot)
-    date = _today_cst()
+def _has_phase_record(records: list[dict[str, Any]], target_date: str, phase_id: str) -> bool:
+    return any(
+        r.get("target_date", r.get("date")) == target_date
+        and r.get("generation_phase", r.get("slot")) == phase_id
+        and r.get("status") != "superseded"
+        for r in records
+    )
+
+
+def _next_phase_version(records: list[dict[str, Any]], target_date: str, phase_id: str) -> int:
+    versions = [
+        int(r.get("version", 1) or 1)
+        for r in records
+        if r.get("target_date", r.get("date")) == target_date
+        and r.get("generation_phase", r.get("slot")) == phase_id
+    ]
+    return (max(versions) + 1) if versions else 1
+
+
+def _mark_superseded(records: list[dict[str, Any]], new_records: list[dict[str, Any]], phase: RecommendationPhase) -> None:
+    new_symbols = {str(r.get("symbol", "")).upper() for r in new_records}
+    new_ids = {str(r.get("id")) for r in new_records}
+    new_target = str(new_records[0].get("target_date")) if new_records else ""
+    for record in records:
+        if str(record.get("id")) in new_ids:
+            continue
+        same_target = record.get("target_date", record.get("date")) == new_target
+        same_phase = record.get("generation_phase", record.get("slot")) == phase.id
+        same_symbol = str(record.get("symbol", "")).upper() in new_symbols
+        if same_target and same_phase:
+            record["status"] = "superseded"
+            record["superseded_by"] = ",".join(sorted(new_ids))
+        elif phase.status == "final" and same_target and same_symbol and record.get("status") == "draft":
+            record["status"] = "superseded"
+            record["superseded_by"] = next((r["id"] for r in new_records if r.get("symbol") == record.get("symbol")), None)
+
+
+def _generate_for_phase(phase_id: str, limit: int, *, target_date: str | None = None) -> list[dict[str, Any]]:
+    phase = _PHASES[_normalize_phase(phase_id)]
+    target = target_date or _target_date_for_phase(phase.id)
+    slot = phase.analysis_slot
     candidates = _reviewed_candidates(slot, limit)
     if not candidates:
         return []
 
     selected = candidates[: min(limit, _MAX_GENERATED)]
-    new_records = [_make_record(item, slot, rank + 1) for rank, item in enumerate(selected)]
     with _STORE_LOCK:
         records = _load_records()
+        version = _next_phase_version(records, target, phase.id)
+        new_records = [
+            _make_record(item, phase.id, target, rank + 1, version)
+            for rank, item in enumerate(selected)
+        ]
+        _mark_superseded(records, new_records, phase)
         existing = {str(r.get("id")): r for r in records}
         for record in new_records:
             existing[record["id"]] = record
         records = sorted(existing.values(), key=lambda r: str(r.get("created_at", "")), reverse=True)
         _save_records(records)
     return new_records
+
+
+def _generate_for_slot(slot: str, limit: int) -> list[dict[str, Any]]:
+    return _generate_for_phase(_normalize_phase(slot), limit)
 
 
 def _is_trading_day_today() -> bool:
@@ -700,16 +1234,21 @@ def register_daily_recommendation_routes(
 
     @app.post("/daily-recommendations/generate", dependencies=[Depends(require_auth)])
     async def generate_recommendations(body: GenerateRecommendationsRequest, request: Request) -> dict[str, Any]:
-        slot = _normalize_slot(body.slot)
-        date = _today_cst()
-        new_records = _generate_for_slot(slot, body.limit)
+        phase_id = _normalize_phase(body.slot)
+        phase = _PHASES[phase_id]
+        target_date = _target_date_for_phase(phase_id)
+        new_records = _generate_for_phase(phase_id, body.limit, target_date=target_date)
         if not new_records:
             raise HTTPException(status_code=503, detail="No recommendation candidates are available")
 
         return {
-            "date": date,
-            "slot": slot,
-            "slot_label": _slot_label(slot),
+            "date": _today_cst(),
+            "target_date": target_date,
+            "slot": phase.analysis_slot,
+            "slot_label": _slot_label(phase.analysis_slot),
+            "generation_phase": phase.id,
+            "phase_label": phase.label,
+            "status": phase.status,
             "items": _with_performance(new_records),
             "updated_at": _now_cst().isoformat(),
         }
@@ -719,6 +1258,9 @@ def register_daily_recommendation_routes(
         request: Request,
         date: str = Query("", max_length=10),
         slot: str = Query("", max_length=16),
+        target_date: str = Query("", max_length=10),
+        phase: str = Query("", max_length=32),
+        status: str = Query("final", max_length=16),
         limit: int = Query(80, ge=1, le=300),
     ) -> dict[str, Any]:
         with _STORE_LOCK:
@@ -726,14 +1268,24 @@ def register_daily_recommendation_routes(
 
         if date:
             records = [r for r in records if r.get("date") == date]
+        if target_date:
+            records = [r for r in records if r.get("target_date", r.get("date")) == target_date]
         if slot:
             normalized = _normalize_slot(slot)
             records = [r for r in records if r.get("slot") == normalized]
+        if phase:
+            normalized_phase = _normalize_phase(phase)
+            records = [r for r in records if r.get("generation_phase", r.get("slot")) == normalized_phase]
+        if status and status != "all":
+            records = [r for r in records if r.get("status", "final") == status]
         records = records[:limit]
         enriched = _with_performance(records)
         cutoff = (_now_cst() - timedelta(days=30)).strftime("%Y-%m-%d")
         with _STORE_LOCK:
-            rolling_records = [r for r in _load_records() if str(r.get("date", "")) >= cutoff]
+            rolling_records = [
+                r for r in _load_records()
+                if str(r.get("date", "")) >= cutoff and r.get("status", "final") == "final"
+            ]
         rolling_enriched = _with_performance(rolling_records)
         return {
             "items": enriched,
@@ -749,22 +1301,50 @@ def register_daily_recommendation_routes(
     ) -> dict[str, Any]:
         cutoff = (_now_cst() - timedelta(days=days)).strftime("%Y-%m-%d")
         with _STORE_LOCK:
-            records = [r for r in _load_records() if str(r.get("date", "")) >= cutoff]
+            records = [
+                r for r in _load_records()
+                if str(r.get("date", "")) >= cutoff and r.get("status", "final") == "final"
+            ]
         enriched = _with_performance(records)
 
         by_slot: dict[str, list[dict[str, Any]]] = {}
+        by_phase: dict[str, list[dict[str, Any]]] = {}
         for record in enriched:
             by_slot.setdefault(str(record.get("slot", "manual")), []).append(record)
+            by_phase.setdefault(str(record.get("generation_phase", record.get("slot", "manual"))), []).append(record)
 
         slot_rows = []
         for slot, rows in sorted(by_slot.items()):
             slot_rows.append({"slot": slot, "slot_label": _slot_label(slot), **_summary(rows)})
+        phase_rows = []
+        for phase_id, rows in sorted(by_phase.items()):
+            phase_rows.append({"generation_phase": phase_id, "phase_label": _phase_label(phase_id), **_summary(rows)})
 
         return {
             "days": days,
             "summary": _summary(enriched),
             "by_slot": slot_rows,
+            "by_phase": phase_rows,
             "items": enriched,
+            "updated_at": _now_cst().isoformat(),
+        }
+
+    @app.get("/daily-recommendations/attribution", dependencies=[Depends(require_auth)])
+    async def recommendation_attribution(
+        request: Request,
+        days: int = Query(30, ge=1, le=365),
+        horizon: str = Query("t1", max_length=2),
+    ) -> dict[str, Any]:
+        cutoff = (_now_cst() - timedelta(days=days)).strftime("%Y-%m-%d")
+        with _STORE_LOCK:
+            records = [
+                r for r in _load_records()
+                if str(r.get("date", "")) >= cutoff and r.get("status", "final") == "final"
+            ]
+        enriched = _with_performance(records)
+        return {
+            "days": days,
+            **_recommendation_attribution(enriched, horizon),
             "updated_at": _now_cst().isoformat(),
         }
 
@@ -779,19 +1359,35 @@ def register_daily_recommendation_routes(
             while True:
                 try:
                     now = _now_cst()
-                    if _is_trading_day_today():
-                        checks = [
-                            ("morning", 9, 27),
-                            ("afternoon", 14, 30),
-                        ]
-                        with _STORE_LOCK:
-                            records = _load_records()
-                        for slot, hour, minute in checks:
-                            due = now.hour > hour or (now.hour == hour and now.minute >= minute)
-                            before_close = now.hour < 15 or (now.hour == 15 and now.minute <= 5)
-                            if due and before_close and not _has_slot_record(records, _today_cst(), slot):
-                                await asyncio.get_running_loop().run_in_executor(None, _generate_for_slot, slot, 5)
-                                logger.info("daily recommendations generated for %s", slot)
+                    checks = [
+                        _PHASES["post_close_base"],
+                        _PHASES["evening_review"],
+                        _PHASES["premarket_review"],
+                        _PHASES["morning_final"],
+                        _PHASES["afternoon_final"],
+                    ]
+                    with _STORE_LOCK:
+                        records = _load_records()
+                    for phase in checks:
+                        target_date = _target_date_for_phase(phase.id, now)
+                        if phase.target_offset_days == 0 and not _is_trading_day_today():
+                            continue
+                        if phase.target_offset_days > 0 and not _is_trading_day_today():
+                            continue
+                        due = now.hour > phase.hour or (now.hour == phase.hour and now.minute >= phase.minute)
+                        if not due or _has_phase_record(records, target_date, phase.id):
+                            continue
+                        await asyncio.get_running_loop().run_in_executor(
+                            None,
+                            _generate_for_phase,
+                            phase.id,
+                            5,
+                        )
+                        logger.info(
+                            "daily recommendations generated phase=%s target_date=%s",
+                            phase.id,
+                            target_date,
+                        )
                     await asyncio.sleep(60)
                 except Exception:
                     logger.exception("daily recommendation scheduler tick failed")

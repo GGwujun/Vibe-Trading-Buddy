@@ -6,14 +6,15 @@ Route:
 - ``GET /opportunity/list`` — four categories of opportunities, each top 10
 
 Scanning flow:
-1. Get active A-share stocks from mootdx (top 200 by recent volume)
-2. Run four detectors per stock
-3. Return top 10 per category, 10-min cache
+1. Get a broad active A-share universe from the local market DB
+2. Run four detectors per stock and score setup quality
+3. Return top 10 per category after full-pool ranking, 10-min cache
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
@@ -34,6 +35,8 @@ logger = logging.getLogger(__name__)
 _CACHE: dict[str, Any] | None = None
 _CACHE_TS: float = 0.0
 _CACHE_LOCK = threading.Lock()
+_DEFAULT_SCAN_LIMIT = 5000
+_MIN_BARS_FOR_SIGNAL = 60
 _CACHE_TTL = 600  # 10 min — scanning 200 stocks is expensive
 
 # ---------------------------------------------------------------------------
@@ -70,12 +73,86 @@ def _fetch_stocks_akshare(limit: int = 200) -> list[dict[str, Any]]:
     return out[:limit]
 
 
+def _scan_limit(default: int = _DEFAULT_SCAN_LIMIT) -> int:
+    raw = os.getenv("OPPORTUNITY_SCAN_LIMIT", "").strip()
+    if not raw:
+        return default
+    try:
+        return max(200, min(int(raw), 6000))
+    except ValueError:
+        return default
+
+
+def _stock_name_map(rows: list[dict[str, Any]]) -> dict[str, str]:
+    names: dict[str, str] = {}
+    for row in rows:
+        code = str(row.get("code") or "").upper()
+        name = str(row.get("name") or row.get("symbol") or code).strip()
+        if code:
+            names[code] = name
+    return names
+
+
+def _valid_signal_stock(code: str, name: str, close: float, avg_turnover_proxy: float) -> bool:
+    if close <= 2 or close >= 200:
+        return False
+    if avg_turnover_proxy <= 0:
+        return False
+    upper_name = name.upper()
+    if "ST" in upper_name or "退" in name:
+        return False
+    return bool(re.match(r"^(000|001|002|003|004|300|301)\d{3}\.SZ$|^60[0-5]\d{3}\.SH$|^688\d{3}\.SH$", code))
+
+
+def _fetch_stocks_from_local_db(limit: int = _DEFAULT_SCAN_LIMIT) -> list[dict[str, Any]]:
+    """Build a broad A-share candidate universe from local settled daily bars."""
+    try:
+        from src.data.market_data_service import daily_bars_batch, default_strategy_codes, security_master
+    except Exception as exc:
+        logger.debug("local opportunity universe imports failed: %s", exc)
+        return []
+
+    codes = default_strategy_codes()
+    if not codes:
+        return []
+    names = _stock_name_map(security_master(default_only=True))
+    bar_data = daily_bars_batch(codes[:limit], days=90)
+    stock_data: list[dict[str, Any]] = []
+    for code, df in bar_data.items():
+        if df is None or df.empty or len(df) < _MIN_BARS_FOR_SIGNAL:
+            continue
+        close = df["close"].astype(float)
+        volume = df["volume"].astype(float)
+        if float(close.iloc[-1]) <= 0 or float(close.iloc[-2]) <= 0:
+            continue
+        avg_turnover_proxy = float((close.tail(5) * volume.tail(5)).mean())
+        name = names.get(code, code)
+        if not _valid_signal_stock(code, name, float(close.iloc[-1]), avg_turnover_proxy):
+            continue
+        stock_data.append({
+            "symbol": code,
+            "name": name,
+            "close": round(float(close.iloc[-1]), 2),
+            "volume_avg_5": float(volume.tail(5).mean()),
+            "turnover_proxy_avg_5": avg_turnover_proxy,
+            "change_pct": round((float(close.iloc[-1]) - float(close.iloc[-2])) / float(close.iloc[-2]) * 100, 2),
+            "df": df,
+        })
+
+    stock_data.sort(key=lambda x: x.get("turnover_proxy_avg_5", 0), reverse=True)
+    logger.info("Opportunity scan: local DB produced %d/%d candidates", len(stock_data), len(codes))
+    return stock_data[:limit]
+
+
 def _fetch_top_stocks(limit: int = 200) -> list[dict[str, Any]]:
     """Get top active A-share stocks by recent volume.
 
     Primary: akshare stock_zh_a_spot (sina backend — works from Aliyun/Docker).
     Fallback: mootdx (native TDX TCP, may not work on all cloud hosts).
     """
+    local = _fetch_stocks_from_local_db(limit)
+    if local:
+        return local
     stocks = _fetch_stocks_akshare(limit)
     if stocks:
         return stocks
@@ -319,13 +396,98 @@ def _detect_event_catalyst(s: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _potential_metrics(s: dict[str, Any]) -> dict[str, float]:
+    df = s.get("df")
+    if df is None or df.empty or len(df) < 30:
+        return {}
+    close = df["close"].astype(float)
+    volume = df["volume"].astype(float)
+    latest = float(close.iloc[-1])
+    if latest <= 0:
+        return {}
+    ma20 = float(_sma(close, 20).iloc[-1])
+    ma60_raw = _sma(close, 60).iloc[-1] if len(close) >= 60 else np.nan
+    ma60 = float(ma60_raw) if not pd.isna(ma60_raw) else ma20
+    ret20 = (latest - float(close.iloc[-20])) / float(close.iloc[-20]) if float(close.iloc[-20]) > 0 else 0.0
+    ret60 = (latest - float(close.iloc[-60])) / float(close.iloc[-60]) if len(close) >= 60 and float(close.iloc[-60]) > 0 else ret20
+    dist_ma20 = (latest - ma20) / ma20 if ma20 > 0 else 0.0
+    dist_ma60 = (latest - ma60) / ma60 if ma60 > 0 else 0.0
+    vol5 = float(volume.tail(5).mean())
+    vol20 = float(volume.tail(20).mean())
+    vol_ratio = vol5 / vol20 if vol20 > 0 else 1.0
+    daily_ret = close.pct_change().dropna()
+    volatility20 = float(daily_ret.tail(20).std()) if len(daily_ret) >= 20 else 0.0
+    high60 = float(close.tail(60).max()) if len(close) >= 60 else float(close.max())
+    drawdown60 = (latest - high60) / high60 if high60 > 0 else 0.0
+    return {
+        "ret20": ret20,
+        "ret60": ret60,
+        "dist_ma20": dist_ma20,
+        "dist_ma60": dist_ma60,
+        "vol_ratio": vol_ratio,
+        "volatility20": volatility20,
+        "drawdown60": drawdown60,
+    }
+
+
+def _opportunity_quality_score(s: dict[str, Any], signal: dict[str, Any], category: str) -> tuple[float, dict[str, float]]:
+    metrics = _potential_metrics(s)
+    score = float(signal.get("confidence", 0.5) or 0.5)
+    change = float(s.get("change_pct", 0) or 0)
+    if not metrics:
+        return round(max(0.01, min(0.99, score)), 3), metrics
+
+    ret20 = metrics["ret20"]
+    dist_ma20 = metrics["dist_ma20"]
+    vol_ratio = metrics["vol_ratio"]
+    volatility20 = metrics["volatility20"]
+    drawdown60 = metrics["drawdown60"]
+
+    # Potential should reward stable structure, not today's heat.
+    if 0.02 <= ret20 <= 0.18:
+        score += 0.08
+    elif ret20 > 0.30:
+        score -= 0.08
+    elif ret20 < -0.10 and category != "oversold":
+        score -= 0.06
+
+    if category == "trend":
+        if 0 <= dist_ma20 <= 0.08:
+            score += 0.08
+        elif dist_ma20 > 0.15:
+            score -= 0.10
+        if -0.12 <= drawdown60 <= -0.02:
+            score += 0.04
+    elif category == "breakout":
+        if 0.03 <= dist_ma20 <= 0.12:
+            score += 0.04
+        if change >= 6:
+            score -= 0.14
+        elif 0 <= change <= 3:
+            score += 0.04
+    elif category == "oversold":
+        if drawdown60 <= -0.15 and change > -4:
+            score += 0.06
+
+    if 0.8 <= vol_ratio <= 1.8:
+        score += 0.04
+    elif vol_ratio > 3:
+        score -= 0.08
+    if volatility20 > 0.055:
+        score -= 0.08
+    if change >= 8:
+        score -= 0.10
+
+    return round(max(0.01, min(0.99, score)), 3), {k: round(v, 4) for k, v in metrics.items()}
+
+
 # ---------------------------------------------------------------------------
 # Build payload
 # ---------------------------------------------------------------------------
 
 
 def _build_opportunities() -> dict[str, Any]:
-    stocks = _fetch_top_stocks(200)
+    stocks = _fetch_top_stocks(_scan_limit())
     if not stocks:
         return {"categories": [], "updated_at": datetime.now(timezone.utc).isoformat(), "error": "无法获取股票数据"}
 
@@ -346,18 +508,19 @@ def _build_opportunities() -> dict[str, Any]:
     results: dict[str, list[dict[str, Any]]] = {c["id"]: [] for c in cats}
     for s in stocks:
         for cat_id, detector in detectors.items():
-            if len(results[cat_id]) >= 10:
-                continue
             try:
                 signal = detector(s)
                 if signal:
+                    quality_score, metrics = _opportunity_quality_score(s, signal, cat_id)
                     results[cat_id].append({
                         "symbol": s["symbol"],
                         "name": s["name"],
                         "price": s.get("close", 0),
                         "change_pct": s.get("change_pct", 0),
                         "reason": signal["reason"],
-                        "confidence": round(signal["confidence"], 3),
+                        "confidence": quality_score,
+                        "raw_confidence": round(float(signal["confidence"]), 3),
+                        "quality_metrics": metrics,
                         "category": cat_id,
                     })
             except Exception:
@@ -366,7 +529,7 @@ def _build_opportunities() -> dict[str, Any]:
     categories = []
     for cat in cats:
         cat_id = cat["id"]
-        categories.append({**cat, "opportunities": sorted(results[cat_id], key=lambda x: x["confidence"], reverse=True)})
+        categories.append({**cat, "opportunities": sorted(results[cat_id], key=lambda x: x["confidence"], reverse=True)[:10]})
 
     return {"categories": categories, "updated_at": datetime.now(timezone.utc).isoformat()}
 

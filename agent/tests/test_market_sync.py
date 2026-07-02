@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+import types
 from unittest import mock
 
 import pytest
@@ -112,6 +114,45 @@ def test_daily_uses_tushare_bulk_before_per_code_fallback(store: MarketStore) ->
     assert m_fetch.call_count == 0
 
 
+def test_daily_falls_back_to_realtime_snapshot_when_settled_sources_empty(store: MarketStore) -> None:
+    store.upsert_realtime_quotes(
+        "2026-07-01",
+        [
+            {
+                "code": "600000.SH",
+                "name": "PF Bank",
+                "price": 12.5,
+                "pre_close": 12.0,
+                "open": 12.1,
+                "high": 12.8,
+                "low": 12.0,
+                "volume": 1000,
+                "total_amt": 12500,
+                "rise_rate": 4.17,
+            }
+        ],
+    )
+
+    with mock.patch.object(ms, "_today_cst_str", return_value="2026-07-01"), \
+         mock.patch("src.data.trade_calendar.cn_market_phase", return_value="post_close"), \
+         mock.patch.object(ms, "_sync_daily_tushare_by_date", return_value=0), \
+         mock.patch.object(ms, "_fetch_daily_range_rows", return_value=[]) as m_fetch:
+        res = ms.run_daily_sync(
+            "2026-07-01",
+            store=store,
+            codes=["600000.SH"],
+            datasets={"daily"},
+            lookback_days=0,
+        )
+
+    assert res["daily"] == 1
+    assert m_fetch.call_count == 0
+    df = store.get_daily_bars("600000.SH", start="2026-07-01", end="2026-07-01")
+    assert df is not None
+    assert float(df["close"].iloc[0]) == 12.5
+    assert float(df["high"].iloc[0]) == 12.8
+
+
 def test_default_daily_universe_filters_to_strategy_codes(store: MarketStore) -> None:
     store.upsert_security_master(
         [
@@ -199,6 +240,49 @@ def test_security_master_tushare_uses_single_active_call(store: MarketStore) -> 
     assert row["name"] == "平安银行"
     assert row["industry"] == "银行"
     assert row["list_date"] == "19910403"
+
+
+def test_realtime_quotes_akshare_falls_back_to_legacy_spot(store: MarketStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    import pandas as pd
+
+    fake_ak = types.SimpleNamespace()
+
+    def broken_em():
+        raise ConnectionError("em disconnected")
+
+    def legacy_spot():
+        return pd.DataFrame(
+            [
+                {
+                    "rank": 1,
+                    "code": "600000",
+                    "name": "PF Bank",
+                    "price": 12.34,
+                    "pre_close": 12.0,
+                    "open": 12.1,
+                    "high": 12.5,
+                    "low": 12.0,
+                    "volume": 1000,
+                    "amount": 1234000,
+                    "change": 0.34,
+                    "change_pct": 2.83,
+                    "turnover_rate": 1.2,
+                }
+            ]
+        )
+
+    fake_ak.stock_zh_a_spot_em = broken_em
+    fake_ak.stock_zh_a_spot = legacy_spot
+    monkeypatch.setitem(sys.modules, "akshare", fake_ak)
+
+    written = ms._sync_realtime_quotes_akshare(store, "2026-07-01")
+
+    assert written == 1
+    quote = store.get_latest_realtime_quote("600000.SH", "2026-07-01")
+    assert quote is not None
+    assert quote["price"] == 12.34
+    assert quote["rise_rate"] == 2.83
+    assert quote["source"] == "akshare.stock_zh_a_spot"
 
 
 def test_etf_daily_uses_tushare_bulk_when_codes_omitted(store: MarketStore) -> None:

@@ -1536,18 +1536,32 @@ def _sync_realtime_quotes_akshare(store: MarketStore, trade_date: str) -> int:
     """Fallback realtime A-share quotes via akshare spot."""
     try:
         import akshare as ak
-
-        if hasattr(ak, "stock_zh_a_spot_em"):
-            df = ak.stock_zh_a_spot_em()
-            source = "akshare.stock_zh_a_spot_em"
-        else:
-            df = ak.stock_zh_a_spot()
-            source = "akshare.stock_zh_a_spot"
     except Exception as exc:  # noqa: BLE001
-        _set_sync_error(store, "realtime", "akshare.stock_spot", exc)
+        _set_sync_error(store, "realtime", "akshare.import", exc)
         return 0
+
+    attempts: list[tuple[str, Any]] = []
+    if hasattr(ak, "stock_zh_a_spot_em"):
+        attempts.append(("akshare.stock_zh_a_spot_em", ak.stock_zh_a_spot_em))
+    if hasattr(ak, "stock_zh_a_spot"):
+        attempts.append(("akshare.stock_zh_a_spot", ak.stock_zh_a_spot))
+
+    df = None
+    source = "akshare.stock_spot"
+    for candidate_source, loader in attempts:
+        source = candidate_source
+        try:
+            df = loader()
+        except Exception as exc:  # noqa: BLE001
+            _set_sync_error(store, "realtime", candidate_source, exc)
+            continue
+        if df is not None and not df.empty:
+            break
+        _set_sync_error(store, "realtime", candidate_source, "empty result")
+        df = None
+
     if df is None or df.empty:
-        _set_sync_error(store, "realtime", "akshare.stock_spot", "empty result")
+        _set_sync_error(store, "realtime", "akshare.stock_spot", "all spot fallbacks failed")
         return 0
 
     code_col = _pick_column(df, ("代码",), 1) or _pick_any_column(df, ("code", "symbol"))
@@ -1596,6 +1610,55 @@ def _sync_realtime_quotes_akshare(store: MarketStore, trade_date: str) -> int:
         _clear_sync_error(store, "realtime", source)
     else:
         _set_sync_error(store, "realtime", source, "empty mapped result")
+    return written
+
+
+def _sync_daily_from_realtime_snapshot(
+    store: MarketStore,
+    trade_date: str,
+    *,
+    codes: Optional[list[str]] = None,
+) -> int:
+    """Persist settled daily bars from the latest realtime quote snapshot.
+
+    This is a post-close degraded fallback for environments where paid daily
+    sources are unavailable. It keeps downstream scanners from repeatedly
+    trading against stale daily bars when realtime snapshots are fresher.
+    """
+    wanted = {str(c).upper() for c in codes} if codes else None
+    rows_by_code: dict[str, dict[str, Any]] = {}
+    for quote in store.get_realtime_quotes(trade_date, limit=10000):
+        code = str(quote.get("code") or "").upper()
+        if not code or (wanted is not None and code not in wanted):
+            continue
+        price = _num(quote.get("price"))
+        if price <= 0:
+            continue
+        open_price = _num(quote.get("open")) or price
+        high = max(_num(quote.get("high")) or price, price, open_price)
+        low_values = [v for v in (_num(quote.get("low")), price, open_price) if v > 0]
+        low = min(low_values) if low_values else price
+        rows_by_code[code] = {
+            "date": trade_date,
+            "open": open_price,
+            "high": high,
+            "low": low,
+            "close": price,
+            "volume": quote.get("volume"),
+            "total_amt": quote.get("total_amt"),
+            "rise_rate": quote.get("rise_rate"),
+            "name": quote.get("name"),
+        }
+
+    written = 0
+    for code, row in rows_by_code.items():
+        written += store.upsert_daily_bars(code, [row])
+    if written:
+        logger.warning(
+            "daily sync used realtime snapshot fallback for %s (%d rows)",
+            trade_date,
+            written,
+        )
     return written
 
 
@@ -4117,18 +4180,28 @@ def _sync_stage_snapshots(store: MarketStore, trade_date: str) -> int:
             if not sector:
                 sector = "板块待匹配"
 
-            df = store.get_etf_daily(bare, end=trade_date) if is_etf else store.get_daily_bars(symbol, days=2, end=trade_date)
             close = None
             prev_close = None
             source_date = None
-            if df is not None and not df.empty:
-                tail = df.tail(2)
-                close = float(tail["close"].iloc[-1])
-                prev_close = float(tail["close"].iloc[-2]) if len(tail) >= 2 else None
-                source_date = tail.index[-1].strftime("%Y-%m-%d")
-            change_pct = round((close - prev_close) / prev_close * 100, 2) if close and prev_close else None
-            if change_pct is None and is_etf and df is not None and not df.empty and "rise" in df.columns:
-                change_pct = round(_num(df["rise"].iloc[-1]) * 100, 2)
+            change_pct = None
+            quote = None if is_etf else (store.get_latest_realtime_quote(symbol, trade_date) or store.get_latest_realtime_quote(bare, trade_date))
+            if quote:
+                close = _num(quote.get("price"))
+                prev_close = _num(quote.get("pre_close"))
+                source_date = str(quote.get("trade_date") or trade_date)
+                if quote.get("rise_rate") is not None:
+                    change_pct = round(_num(quote.get("rise_rate")), 2)
+            if not close:
+                df = store.get_etf_daily(bare, end=trade_date) if is_etf else store.get_daily_bars(symbol, days=2, end=trade_date)
+                if df is not None and not df.empty:
+                    tail = df.tail(2)
+                    close = float(tail["close"].iloc[-1])
+                    prev_close = float(tail["close"].iloc[-2]) if len(tail) >= 2 else None
+                    source_date = tail.index[-1].strftime("%Y-%m-%d")
+                if change_pct is None and close and prev_close:
+                    change_pct = round((close - prev_close) / prev_close * 100, 2)
+                if change_pct is None and is_etf and df is not None and not df.empty and "rise" in df.columns:
+                    change_pct = round(_num(df["rise"].iloc[-1]) * 100, 2)
             cost = _num(item.get("cost"))
             shares = _num(item.get("shares"))
             pnl_pct = round((close - cost) / cost * 100, 2) if close and cost else None
@@ -4184,6 +4257,7 @@ def _sync_stage_snapshots(store: MarketStore, trade_date: str) -> int:
             "sector_capital_top": sector_capital[:5],
             "stock_inflow_top": stock_inflow[:8],
             "stock_outflow_top": stock_outflow[:8],
+            "holding_sector_strength": holding_sector_strength,
             "alerts": [{"title": emotion_phase, "message": emotion_note, "source": "stock_pool"}],
             "scheduled_tasks": [],
         },
@@ -4370,7 +4444,12 @@ def run_daily_sync(
                 result["daily"] = written
                 universe_codes = []
             else:
-                universe_codes = daily_codes
+                written = _sync_daily_from_realtime_snapshot(store, trade_date, codes=daily_codes)
+                if written:
+                    result["daily"] = written
+                    universe_codes = []
+                else:
+                    universe_codes = daily_codes
         else:
             universe_codes = (
                 codes if codes is not None else _all_a_share_codes(
@@ -4393,6 +4472,8 @@ def run_daily_sync(
                 if time.monotonic() > deadline:
                     logger.warning("daily sync hit deadline at %d/%d codes", i, len(universe_codes))
                     break
+            if written == 0 and latest_settled == trade_date:
+                written = _sync_daily_from_realtime_snapshot(store, trade_date, codes=universe_codes)
             result["daily"] = written
 
     def _run(name: str, fn: Any) -> None:
